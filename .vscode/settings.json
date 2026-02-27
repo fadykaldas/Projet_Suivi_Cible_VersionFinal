@@ -1,0 +1,9 @@
+{
+  "files.associations": {
+    "*.ino": "cpp"
+  },
+  "[cpp]": {
+    "editor.defaultFormatter": "ms-vscode.cpptools"
+  },
+  "C_Cpp.errorSquiggles": "disabled"
+}
