@@ -29,47 +29,26 @@ CAM_CLOSE_AFTER_RADAR_LOSS = 10.0
 CAM_INDEX = 0
 
 # Radar rendu
-RADAR_MAX_RANGE_CM = 200.0      # échelle du radar (ajuste selon ton capteur)
+RADAR_MAX_RANGE_CM = 200.0      # échelle du radar
 POINT_TTL_SEC = 2.0             # durée de vie des points rouges
 SWEEP_TRAIL = 18                # traînée du balayage
 
-# ---- Calibration angle (IMPORTANT) ----
+# ---- Calibration angle ----
 # Mets ici la VRAIE plage de ton servo si ce n’est pas 0..180
 SERVO_MIN_ANGLE = 0.0           # ex: 20.0
 SERVO_MAX_ANGLE = 180.0         # ex: 160.0
+RADAR_FLIP = True               # inverse gauche/droite si besoin
+RADAR_OFFSET_DEG = 0.0          # décale le centre si besoin (+10 / -10)
+# --------------------------
 
-RADAR_FLIP = True               # True si gauche/droite est inversé, sinon False
-RADAR_OFFSET_DEG = 0.0          # ex: +10 ou -10 si ton centre est décalé
-# --------------------------------------
+# Debug (affiche raw + angle/distance en bas)
+SHOW_DEBUG = True
 # ------------------------
 
 
 def list_com_ports():
     ports = list(serial.tools.list_ports.comports())
     return [(p.device, p.description) for p in ports]
-
-
-def parse_angle_distance(line: str):
-    """
-    Supporte:
-    - "53.2"
-    - "Distance: 53.2 cm"
-    - "Angle: 90 Distance: 53.2"
-    - "90,53.2"
-    Retour:
-    - si 2+ nombres -> angle = 1er, distance = dernier
-    - si 1 nombre -> distance seulement (angle None)
-    """
-    if not line:
-        return None, None
-
-    nums = re.findall(r"\d+(?:\.\d+)?", line)
-    if not nums:
-        return None, None
-
-    if len(nums) >= 2:
-        return float(nums[0]), float(nums[-1])
-    return None, float(nums[0])
 
 
 def frame_to_pixmap(frame_bgr):
@@ -80,14 +59,63 @@ def frame_to_pixmap(frame_bgr):
     return QPixmap.fromImage(qimg)
 
 
+class SerialParser:
+    """
+    Rend l’app robuste aux formats Arduino:
+    1) "angle,distance"
+    2) "Angle: 161 Distance: 8"
+    3) 2 lignes: "161" puis "8"
+    4) distance seule (angle restera None)
+    """
+    def __init__(self):
+        self.pending_angle = None  # pour le cas angle puis distance sur 2 lignes
+
+    def feed(self, line: str):
+        if not line:
+            return None, None
+
+        s = line.strip()
+        low = s.lower()
+
+        nums = re.findall(r"\d+(?:\.\d+)?", s)
+        if not nums:
+            return None, None
+
+        # Cas "angle,distance" ou plusieurs nombres dans la même ligne
+        if len(nums) >= 2:
+            a = float(nums[0])
+            d = float(nums[-1])
+            self.pending_angle = None
+            return a, d
+
+        # Cas 1 seul nombre
+        n = float(nums[0])
+
+        # Si la ligne mentionne angle/deg -> angle
+        if ("ang" in low) or ("deg" in low):
+            self.pending_angle = n
+            return n, None
+
+        # Si la ligne mentionne distance/cm -> distance
+        if ("dist" in low) or ("cm" in low):
+            if self.pending_angle is not None:
+                a = self.pending_angle
+                self.pending_angle = None
+                return a, n
+            return None, n
+
+        # Cas lignes numériques pures:
+        # on assume "angle puis distance" en alternance.
+        if self.pending_angle is None:
+            self.pending_angle = n
+            return None, None
+        else:
+            a = self.pending_angle
+            self.pending_angle = None
+            return a, n
+
+
 class RadarWidget(QWidget):
-    """
-    Radar style:
-    - demi-cercle
-    - grille verte
-    - balayage vert (avec traînée)
-    - points rouges (objets)
-    """
     def __init__(self):
         super().__init__()
         self.setMinimumSize(520, 380)
@@ -99,20 +127,10 @@ class RadarWidget(QWidget):
         self.sweep_angles = deque(maxlen=SWEEP_TRAIL)          # angles récents (trail)
         self.points = deque(maxlen=400)                        # (angle, dist, timestamp)
 
-    def set_max_range(self, cm: float):
-        self.max_range = max(10.0, float(cm))
-        self.update()
-
     def map_angle(self, angle_deg: float) -> float:
-        """
-        Convertit l’angle servo -> angle radar 0..180
-        - clamp sur SERVO_MIN..SERVO_MAX
-        - normalize en 0..180 si servo ne fait pas tout le range
-        - offset
-        - flip optionnel
-        """
         a = max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, float(angle_deg)))
 
+        # normalize en 0..180 si servo ne fait pas tout le range
         if SERVO_MAX_ANGLE != SERVO_MIN_ANGLE:
             a = (a - SERVO_MIN_ANGLE) * 180.0 / (SERVO_MAX_ANGLE - SERVO_MIN_ANGLE)
 
@@ -124,42 +142,36 @@ class RadarWidget(QWidget):
 
         return a
 
-    def update_data(self, angle, dist):
+    def update_data(self, angle_raw, dist_cm):
         now = time.time()
 
-        # angle
-        if angle is not None:
-            angle = self.map_angle(angle)
-            self.last_angle = angle
-            self.sweep_angles.appendleft(angle)
+        if angle_raw is not None:
+            ang = self.map_angle(angle_raw)
+            self.last_angle = ang
+            self.sweep_angles.appendleft(ang)
         else:
-            # si pas d’angle, on garde le dernier angle
+            # si pas d’angle, on garde le dernier angle (mais ça veut dire Arduino n’envoie pas d’angle)
             self.sweep_angles.appendleft(self.last_angle)
 
-        # distance
-        if dist is not None:
-            self.last_distance = float(dist)
+        if dist_cm is not None:
+            self.last_distance = float(dist_cm)
             if 0.0 < self.last_distance <= self.max_range:
                 self.points.append((self.last_angle, self.last_distance, now))
 
         self.update()
 
     def paintEvent(self, event):
-        # cleanup points expirés
         now = time.time()
         while self.points and (now - self.points[0][2]) > POINT_TTL_SEC:
             self.points.popleft()
 
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        # fond
         p.fillRect(self.rect(), QColor(0, 0, 0))
 
         w = self.width()
         h = self.height()
 
-        # centre en bas
         cx = w * 0.5
         cy = h * 0.95
         radius = min(w * 0.48, h * 0.9)
@@ -167,18 +179,15 @@ class RadarWidget(QWidget):
         green = QColor(0, 255, 80)
         dark_green = QColor(0, 110, 40)
 
-        # grille: arcs
-        pen_grid = QPen(dark_green)
-        pen_grid.setWidth(2)
-        p.setPen(pen_grid)
-
+        # grille arcs
+        p.setPen(QPen(dark_green, 2))
         for frac in [0.25, 0.5, 0.75, 1.0]:
             r = radius * frac
             p.drawArc(int(cx - r), int(cy - r), int(2 * r), int(2 * r), 0 * 16, 180 * 16)
 
-        # grille: lignes d’angles
+        # lignes angle
         for ang in [0, 30, 60, 90, 120, 150, 180]:
-            rad = math.radians(180 - ang)  # 0=left, 180=right
+            rad = math.radians(180 - ang)  # 0=left 180=right
             x = cx + radius * math.cos(rad)
             y = cy - radius * math.sin(rad)
             p.drawLine(int(cx), int(cy), int(x), int(y))
@@ -188,7 +197,6 @@ class RadarWidget(QWidget):
         p.setFont(QFont("Consolas", 10))
         p.drawText(10, 20, "Radar Display")
 
-        # labels distance
         for frac in [0.5, 1.0]:
             r = radius * frac
             cm = self.max_range * frac
@@ -199,25 +207,22 @@ class RadarWidget(QWidget):
         p.drawText(10, 40, angle_txt)
         p.drawText(10, 60, dist_txt)
 
-        # balayage (trail)
+        # sweep trail
         for i, ang in enumerate(self.sweep_angles):
             alpha = max(20, 255 - i * 12)
-            pen_sweep = QPen(QColor(0, 255, 80, alpha))
-            pen_sweep.setWidth(2 if i > 0 else 4)
-            p.setPen(pen_sweep)
+            pen = QPen(QColor(0, 255, 80, alpha), 4 if i == 0 else 2)
+            p.setPen(pen)
 
             rad = math.radians(180 - ang)
             x = cx + radius * math.cos(rad)
             y = cy - radius * math.sin(rad)
             p.drawLine(QPointF(cx, cy), QPointF(x, y))
 
-        # points rouges (objets)
+        # points rouges
         for (ang, dist, ts) in self.points:
             age = now - ts
             fade = max(40, int(255 * (1.0 - age / POINT_TTL_SEC)))
-            pen_pt = QPen(QColor(255, 0, 0, fade))
-            pen_pt.setWidth(6)
-            p.setPen(pen_pt)
+            p.setPen(QPen(QColor(255, 0, 0, fade), 6))
 
             r = (dist / self.max_range) * radius
             rad = math.radians(180 - ang)
@@ -230,23 +235,21 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Projet Suivi Cible - App")
-        self.resize(1200, 700)
+        self.resize(1200, 720)
 
-        # Serial + data
         self.ser = None
-        self.last_angle_raw = None      # angle brut Arduino
+        self.parser = SerialParser()
+
+        self.last_angle_raw = None
         self.last_distance = None
         self.dist_history = deque(maxlen=5)
 
-        # Radar->camera state machine
         self.state = "idle"
         self.detect_start = None
         self.loss_start = None
 
-        # Camera
         self.cam = None
 
-        # --- UI ---
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
@@ -291,6 +294,11 @@ class MainWindow(QMainWindow):
         radar_layout = QVBoxLayout(self.radar_box)
         self.radar_widget = RadarWidget()
         radar_layout.addWidget(self.radar_widget)
+
+        self.debug_label = QLabel("")
+        self.debug_label.setStyleSheet("color:#bbb; font-family:Consolas; font-size:12px;")
+        self.debug_label.setVisible(SHOW_DEBUG)
+        radar_layout.addWidget(self.debug_label)
 
         self.cam_box = QGroupBox("Camera")
         cam_layout = QVBoxLayout(self.cam_box)
@@ -345,6 +353,7 @@ class MainWindow(QMainWindow):
                 self.ser.reset_input_buffer()
             except Exception:
                 pass
+            self.parser = SerialParser()
             self.btn_connect.setText("Disconnect")
             self.statusBar().showMessage(f"Connected to {port} @ {BAUD}")
         except PermissionError:
@@ -370,6 +379,7 @@ class MainWindow(QMainWindow):
         self.state = "idle"
         self.detect_start = None
         self.loss_start = None
+        self.debug_label.setText("")
 
     def apply_view_mode(self):
         mode = self.view_combo.currentText()
@@ -425,19 +435,27 @@ class MainWindow(QMainWindow):
         except Exception:
             return
 
-        angle, dist = parse_angle_distance(line)
+        a, d = self.parser.feed(line)
 
-        if angle is not None:
-            self.last_angle_raw = angle
+        # si on reçoit angle seul -> on garde
+        if a is not None:
+            self.last_angle_raw = a
 
-        self.dist_history.append(dist)
-        valid = [d for d in self.dist_history if d is not None]
-        smooth = statistics.median(valid) if valid else None
-        if smooth is not None:
-            self.last_distance = smooth
+        # smoothing distance
+        if d is not None:
+            self.dist_history.append(d)
+            valid = [x for x in self.dist_history if x is not None]
+            smooth = statistics.median(valid) if valid else None
+            if smooth is not None:
+                self.last_distance = smooth
 
-        # update radar (RadarWidget mappe l’angle lui-même)
+        # update radar (même si angle ou distance arrive séparément)
         self.radar_widget.update_data(self.last_angle_raw, self.last_distance)
+
+        if SHOW_DEBUG:
+            self.debug_label.setText(
+                f"RAW: {line}\nparsed: angle={a}  dist={d}\nkept: angle_raw={self.last_angle_raw}  dist_smooth={self.last_distance}"
+            )
 
         # auto camera
         if not self.auto_cam_check.isChecked():
