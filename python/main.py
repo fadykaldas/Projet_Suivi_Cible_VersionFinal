@@ -1,7 +1,10 @@
 import cv2
 import time
+from collections import deque
+import statistics
 import serial
 import serial.tools.list_ports
+import argparse
 
 # -------- CONFIG --------
 PORT = "COM5"
@@ -9,9 +12,10 @@ BAUD = 115200
 
 ON_THRESHOLD_CM = 60.0       # ouvrir caméra si distance <= 60 cm
 OFF_THRESHOLD_CM = 70.0      # fermer caméra si distance >= 70 cm (hysteresis)
-TRIGGER_CONFIRM_SEC = 0.4    # doit rester sous le seuil ON pendant 0.4s avant d'ouvrir
+TRIGGER_CONFIRM_SEC = 2.0    # doit rester sous le seuil ON pendant 2s avant d'ouvrir
 
 HOLD_SECONDS = 2.0           # visage détecté 2 sec => CIBLE DETECTEE
+CAM_CLOSE_AFTER_RADAR_LOSS = 10.0  # close camera after 10s with no radar confirmation
 CAM_INDEX = 0
 # ------------------------
 
@@ -25,7 +29,7 @@ def open_camera():
     for idx in indices:
         cam = cv2.VideoCapture(idx)
         if cam.isOpened():
-            print(f"✓ Camera opened on index {idx}")
+            print(f"Camera opened on index {idx}")
             return cam
         try:
             cam.release()
@@ -99,7 +103,7 @@ def connect_serial(preferred_port=None):
     for attempt in range(max_retries):
         try:
             ser = serial.Serial(selected, BAUD, timeout=0.2)
-            print(f"✓ Connected to {selected} at {BAUD} baud")
+            print(f"Connected to {selected} at {BAUD} baud")
             return ser
         except PermissionError as pe:
             print(f"Permission error opening {selected}: {pe}")
@@ -120,7 +124,7 @@ def connect_serial(preferred_port=None):
 
 
 
-def main():
+def main(simulate=False):
     # Haar cascade intégré OpenCV (pas besoin du xml dans ton dossier)
     cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     face_cascade = cv2.CascadeClassifier(cascade_path)
@@ -128,27 +132,50 @@ def main():
         print("ERROR: Failed to load Haar cascade")
         return
 
-    # Serial Arduino
-    try:
-        ser = connect_serial()
-    except Exception as e:
-        print(f"Warning: serial unavailable: {e}")
-        ser = None
+    # Serial Arduino (prefer configured PORT)
+    ser = None
+    if simulate:
+        class FakeSerial:
+            def __init__(self, timeline):
+                self.start = time.time()
+                self.timeline = timeline
+
+            def readline(self):
+                t = time.time() - self.start
+                for (s, e, v) in self.timeline:
+                    if s <= t < e:
+                        return (f"{v:.2f}\n").encode()
+                return ("200.00\n").encode()
+
+        # timeline: (start, end, distance_cm)
+        timeline = [ (0.0, 2.0, 200.0), (2.0, 6.0, 50.0), (6.0, 120.0, 200.0) ]
+        ser = FakeSerial(timeline)
+        print("SIMULATION: using fake serial")
+    else:
+        try:
+            ser = connect_serial(PORT)
+        except Exception as e:
+            print(f"Warning: serial unavailable: {e}")
+            ser = None
+
+    cam = None
+    last_distance = None
+    # keep short history and use median to filter noisy readings
+    dist_history = deque(maxlen=5)
 
     # If serial unavailable, continue in camera-only mode
     if ser is None:
         print("Proceeding in camera-only mode (no radar).")
         # Open camera immediately for camera-only operation
-        if cam is None:
-            cam = open_camera()
+        cam = open_camera()
 
     time.sleep(2)  # laisse Arduino reset
 
-    cam = None
-    last_distance = None
-
-    below_start = None     # moment où la distance est passée sous ON_THRESHOLD_CM
-    target_start = None    # moment où le visage est détecté (pour HOLD_SECONDS)
+    # radar state machine
+    detect_start = None    # moment distance went under ON_THRESHOLD_CM (arming)
+    loss_start = None      # moment distance went above ON_THRESHOLD_CM while camera open
+    target_start = None    # moment where face was first detected (for HOLD_SECONDS)
+    state = 'idle'         # 'idle' or 'open'
 
     print("Running... Press 'q' to quit.")
 
@@ -157,37 +184,67 @@ def main():
             # 1) Lire distance Arduino (si disponible)
             if ser is not None:
                 try:
-                    line = ser.readline().decode(errors="ignore").strip()
+                    raw = ser.readline()
+                    try:
+                        line = raw.decode(errors="replace").strip()
+                    except Exception:
+                        line = str(raw)
                     dist = parse_distance(line)
-                    if dist is not None:
-                        last_distance = dist
+                    # push to history (None when invalid)
+                    dist_history.append(dist)
+                    # compute median of valid values
+                    valid = [d for d in dist_history if d is not None]
+                    smooth = statistics.median(valid) if valid else None
+                    # Debug: show raw, parsed and smoothed values
+                    print(f"[SERIAL] raw={line!r} parsed={dist} smooth={smooth}")
+                    if smooth is not None:
+                        last_distance = smooth
                 except Exception as e:
                     print(f"Serial read error: {e}")
 
             now = time.time()
 
-            # 2) CONFIRMATION radar (anti faux-positifs)
-            #    On considère "détection" seulement si la distance reste <= ON_THRESHOLD pendant TRIGGER_CONFIRM_SEC
-            if last_distance is not None and last_distance <= ON_THRESHOLD_CM:
-                if below_start is None:
-                    below_start = now
-            else:
-                below_start = None
+            # 2) Radar state machine: require continuous detection for TRIGGER_CONFIRM_SEC to open,
+            #    and close camera after CAM_CLOSE_AFTER_RADAR_LOSS seconds of no detection.
+            detected_now = (last_distance is not None) and (last_distance <= ON_THRESHOLD_CM)
 
-            radar_confirmed = (below_start is not None) and ((now - below_start) >= TRIGGER_CONFIRM_SEC)
+            if state == 'idle':
+                if detected_now:
+                    if detect_start is None:
+                        detect_start = now
+                    elif (now - detect_start) >= TRIGGER_CONFIRM_SEC:
+                        # confirmed -> open camera
+                        print(f"Radar confirmed (stable {TRIGGER_CONFIRM_SEC}s) -> opening camera")
+                        cam = open_camera()
+                        if cam is not None:
+                            state = 'open'
+                            target_start = None
+                        detect_start = None
+                        loss_start = None
+                else:
+                    # reset arming when not detecting
+                    detect_start = None
 
-            # 3) Ouvrir caméra quand radar confirmé
-            if radar_confirmed and cam is None:
-                cam = open_camera()
-                target_start = None
+            elif state == 'open':
+                if not detected_now:
+                    if loss_start is None:
+                        loss_start = now
+                    elif (now - loss_start) >= CAM_CLOSE_AFTER_RADAR_LOSS:
+                        print(f"Radar lost for {CAM_CLOSE_AFTER_RADAR_LOSS}s -> closing camera")
+                        if cam is not None:
+                            cam.release()
+                            cam = None
+                            cv2.destroyAllWindows()
+                        state = 'idle'
+                        target_start = None
+                        detect_start = None
+                        loss_start = None
+                else:
+                    # still detecting -> reset loss timer
+                    loss_start = None
 
-            # 4) Fermer caméra seulement si on est clairement loin (hysteresis OFF)
-            if cam is not None and last_distance is not None and last_distance >= OFF_THRESHOLD_CM:
-                cam.release()
-                cam = None
-                cv2.destroyAllWindows()
-                target_start = None
-                below_start = None
+            # debug state
+            print(f"[RADAR] state={state} last_distance={last_distance} detect_start={detect_start} loss_start={loss_start}")
 
             # 5) Si caméra active: détection visage + timer 2 secondes
             if cam is not None:
@@ -222,13 +279,16 @@ def main():
                 cv2.putText(frame, dist_text, (20, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
 
-                # UI: statut radar
-                if below_start is not None and not radar_confirmed:
+                # UI: statut radar (use state machine)
+                if state == 'open':
+                    cv2.putText(frame, "RADAR CONFIRME", (20, 90),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+                elif detect_start is not None:
                     cv2.putText(frame, "DETECTION... (confirmation)", (20, 90),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
                 else:
-                    cv2.putText(frame, "RADAR CONFIRME", (20, 90),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+                    cv2.putText(frame, "RADAR: N/A", (20, 90),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (200, 200, 200), 2)
 
                 # UI: cible détectée si stable
                 if detected and elapsed >= HOLD_SECONDS:
@@ -273,4 +333,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Radar -> camera controller")
+    parser.add_argument("--simulate", action="store_true", help="Run with fake serial data for testing")
+    args = parser.parse_args()
+    main(simulate=args.simulate)
