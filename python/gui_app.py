@@ -20,28 +20,28 @@ from PyQt6.QtWidgets import (
 BAUD = 115200
 SERIAL_TIMEOUT_SEC = 0.05
 
-# Déclenchement caméra
+# Radar -> camera
 ON_THRESHOLD_CM = 60.0
 OFF_THRESHOLD_CM = 70.0
 TRIGGER_CONFIRM_SEC = 2.0
 CAM_CLOSE_AFTER_RADAR_LOSS = 10.0
 
+# Camera / OpenCV
 CAM_INDEX = 0
+HOLD_SECONDS = 2.0                 # si objet détecté >= 2s => CIBLE DETECTEE
+DETECT_EVERY_N_FRAMES = 2          # 1 = chaque frame (plus lourd), 2 = 1 frame sur 2
 
 # Radar rendu
-RADAR_MAX_RANGE_CM = 200.0      # échelle du radar
-POINT_TTL_SEC = 2.0             # durée de vie des points rouges
-SWEEP_TRAIL = 18                # traînée du balayage
+RADAR_MAX_RANGE_CM = 200.0
+POINT_TTL_SEC = 2.0
+SWEEP_TRAIL = 18
 
-# ---- Calibration angle ----
-# Mets ici la VRAIE plage de ton servo si ce n’est pas 0..180
-SERVO_MIN_ANGLE = 0.0           # ex: 20.0
-SERVO_MAX_ANGLE = 180.0         # ex: 160.0
-RADAR_FLIP = True               # inverse gauche/droite si besoin
-RADAR_OFFSET_DEG = 0.0          # décale le centre si besoin (+10 / -10)
-# --------------------------
+# Calibration angle radar
+SERVO_MIN_ANGLE = 0.0
+SERVO_MAX_ANGLE = 180.0
+RADAR_FLIP = True
+RADAR_OFFSET_DEG = 0.0
 
-# Debug (affiche raw + angle/distance en bas)
 SHOW_DEBUG = True
 # ------------------------
 
@@ -61,14 +61,14 @@ def frame_to_pixmap(frame_bgr):
 
 class SerialParser:
     """
-    Rend l’app robuste aux formats Arduino:
-    1) "angle,distance"
-    2) "Angle: 161 Distance: 8"
-    3) 2 lignes: "161" puis "8"
-    4) distance seule (angle restera None)
+    Supporte:
+    - "angle,distance"  ex: "161,8"
+    - "Angle: 161 Distance: 8"
+    - 2 lignes séparées: "161" puis "8"
+    - distance seule (angle restera None)
     """
     def __init__(self):
-        self.pending_angle = None  # pour le cas angle puis distance sur 2 lignes
+        self.pending_angle = None
 
     def feed(self, line: str):
         if not line:
@@ -76,27 +76,22 @@ class SerialParser:
 
         s = line.strip()
         low = s.lower()
-
         nums = re.findall(r"\d+(?:\.\d+)?", s)
         if not nums:
             return None, None
 
-        # Cas "angle,distance" ou plusieurs nombres dans la même ligne
         if len(nums) >= 2:
             a = float(nums[0])
             d = float(nums[-1])
             self.pending_angle = None
             return a, d
 
-        # Cas 1 seul nombre
         n = float(nums[0])
 
-        # Si la ligne mentionne angle/deg -> angle
         if ("ang" in low) or ("deg" in low):
             self.pending_angle = n
             return n, None
 
-        # Si la ligne mentionne distance/cm -> distance
         if ("dist" in low) or ("cm" in low):
             if self.pending_angle is not None:
                 a = self.pending_angle
@@ -104,15 +99,13 @@ class SerialParser:
                 return a, n
             return None, n
 
-        # Cas lignes numériques pures:
-        # on assume "angle puis distance" en alternance.
+        # numeric-only lines: assume alternating angle then distance
         if self.pending_angle is None:
             self.pending_angle = n
             return None, None
-        else:
-            a = self.pending_angle
-            self.pending_angle = None
-            return a, n
+        a = self.pending_angle
+        self.pending_angle = None
+        return a, n
 
 
 class RadarWidget(QWidget):
@@ -124,13 +117,12 @@ class RadarWidget(QWidget):
         self.last_angle = 90.0
         self.last_distance = None
 
-        self.sweep_angles = deque(maxlen=SWEEP_TRAIL)          # angles récents (trail)
-        self.points = deque(maxlen=400)                        # (angle, dist, timestamp)
+        self.sweep_angles = deque(maxlen=SWEEP_TRAIL)
+        self.points = deque(maxlen=400)  # (angle, dist, timestamp)
 
     def map_angle(self, angle_deg: float) -> float:
         a = max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, float(angle_deg)))
 
-        # normalize en 0..180 si servo ne fait pas tout le range
         if SERVO_MAX_ANGLE != SERVO_MIN_ANGLE:
             a = (a - SERVO_MIN_ANGLE) * 180.0 / (SERVO_MAX_ANGLE - SERVO_MIN_ANGLE)
 
@@ -150,7 +142,6 @@ class RadarWidget(QWidget):
             self.last_angle = ang
             self.sweep_angles.appendleft(ang)
         else:
-            # si pas d’angle, on garde le dernier angle (mais ça veut dire Arduino n’envoie pas d’angle)
             self.sweep_angles.appendleft(self.last_angle)
 
         if dist_cm is not None:
@@ -169,30 +160,24 @@ class RadarWidget(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.fillRect(self.rect(), QColor(0, 0, 0))
 
-        w = self.width()
-        h = self.height()
-
-        cx = w * 0.5
-        cy = h * 0.95
+        w, h = self.width(), self.height()
+        cx, cy = w * 0.5, h * 0.95
         radius = min(w * 0.48, h * 0.9)
 
         green = QColor(0, 255, 80)
         dark_green = QColor(0, 110, 40)
 
-        # grille arcs
         p.setPen(QPen(dark_green, 2))
         for frac in [0.25, 0.5, 0.75, 1.0]:
             r = radius * frac
             p.drawArc(int(cx - r), int(cy - r), int(2 * r), int(2 * r), 0 * 16, 180 * 16)
 
-        # lignes angle
         for ang in [0, 30, 60, 90, 120, 150, 180]:
-            rad = math.radians(180 - ang)  # 0=left 180=right
+            rad = math.radians(180 - ang)
             x = cx + radius * math.cos(rad)
             y = cy - radius * math.sin(rad)
             p.drawLine(int(cx), int(cy), int(x), int(y))
 
-        # textes
         p.setPen(QPen(green))
         p.setFont(QFont("Consolas", 10))
         p.drawText(10, 20, "Radar Display")
@@ -207,7 +192,6 @@ class RadarWidget(QWidget):
         p.drawText(10, 40, angle_txt)
         p.drawText(10, 60, dist_txt)
 
-        # sweep trail
         for i, ang in enumerate(self.sweep_angles):
             alpha = max(20, 255 - i * 12)
             pen = QPen(QColor(0, 255, 80, alpha), 4 if i == 0 else 2)
@@ -218,7 +202,6 @@ class RadarWidget(QWidget):
             y = cy - radius * math.sin(rad)
             p.drawLine(QPointF(cx, cy), QPointF(x, y))
 
-        # points rouges
         for (ang, dist, ts) in self.points:
             age = now - ts
             fade = max(40, int(255 * (1.0 - age / POINT_TTL_SEC)))
@@ -235,28 +218,35 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Projet Suivi Cible - App")
-        self.resize(1200, 720)
+        self.resize(1200, 740)
 
+        # Serial
         self.ser = None
         self.parser = SerialParser()
-
         self.last_angle_raw = None
         self.last_distance = None
         self.dist_history = deque(maxlen=5)
 
+        # Radar->camera state machine
         self.state = "idle"
         self.detect_start = None
         self.loss_start = None
 
+        # Camera
         self.cam = None
 
+        # OpenCV detector (ton "folder OpenCV" = la détection ici)
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        self.face_cascade = cv2.CascadeClassifier(cascade_path)
+        self.detector_frame_count = 0
+        self.target_start = None  # timer HOLD_SECONDS
+
+        # UI
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QVBoxLayout(central)
 
-        # Top bar
         top = QHBoxLayout()
-
         self.port_combo = QComboBox()
         self.btn_refresh = QPushButton("Refresh ports")
         self.btn_refresh.clicked.connect(self.refresh_ports)
@@ -271,6 +261,9 @@ class MainWindow(QMainWindow):
         self.auto_cam_check = QCheckBox("Auto camera from radar (2s)")
         self.auto_cam_check.setChecked(True)
 
+        self.detect_check = QCheckBox("OpenCV detect")
+        self.detect_check.setChecked(True)
+
         self.btn_camera = QPushButton("Start camera")
         self.btn_camera.clicked.connect(self.toggle_camera)
 
@@ -283,11 +276,11 @@ class MainWindow(QMainWindow):
         top.addWidget(self.view_combo)
         top.addSpacing(20)
         top.addWidget(self.auto_cam_check)
+        top.addWidget(self.detect_check)
         top.addWidget(self.btn_camera)
         top.addStretch()
         main_layout.addLayout(top)
 
-        # Content
         content = QHBoxLayout()
 
         self.radar_box = QGroupBox("Radar")
@@ -315,7 +308,6 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("Ready")
 
-        # Timers
         self.serial_timer = QTimer()
         self.serial_timer.timeout.connect(self.serial_tick)
         self.serial_timer.start(20)
@@ -386,7 +378,7 @@ class MainWindow(QMainWindow):
         self.radar_box.setVisible(mode in ["Both", "Radar only"])
         self.cam_box.setVisible(mode in ["Both", "Camera only"])
 
-    # Camera
+    # ---- Camera control ----
     def toggle_camera(self):
         if self.cam is None:
             self.open_camera()
@@ -403,6 +395,7 @@ class MainWindow(QMainWindow):
         self.cam = cam
         self.btn_camera.setText("Stop camera")
         self.cam_label.setText("Camera running")
+        self.target_start = None
 
     def close_camera(self):
         try:
@@ -413,16 +406,55 @@ class MainWindow(QMainWindow):
         self.cam = None
         self.btn_camera.setText("Start camera")
         self.cam_label.setText("Camera stopped")
+        self.target_start = None
 
+    # ---- OpenCV processing INSIDE the app ----
     def camera_tick(self):
         if self.cam is None:
             return
+
         ret, frame = self.cam.read()
         if not ret:
             return
+
+        now = time.time()
+
+        detected_obj = False
+        elapsed = 0.0
+
+        if self.detect_check.isChecked() and not self.face_cascade.empty():
+            self.detector_frame_count += 1
+
+            if self.detector_frame_count % DETECT_EVERY_N_FRAMES == 0:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=4)
+
+                detected_obj = (len(faces) > 0)
+
+                for (x, y, w, h) in faces:
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+                if detected_obj:
+                    if self.target_start is None:
+                        self.target_start = now
+                    elapsed = now - self.target_start
+                else:
+                    self.target_start = None
+                    elapsed = 0.0
+
+        # overlay texte (comme ton main.py)
+        dist_text = f"Distance: {self.last_distance:.1f} cm" if self.last_distance is not None else "Distance: N/A"
+        cv2.putText(frame, dist_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+
+        if detected_obj and elapsed >= HOLD_SECONDS:
+            cv2.putText(frame, "CIBLE DETECTEE", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+        else:
+            cv2.putText(frame, f"Hold: {elapsed:.1f}s / {HOLD_SECONDS:.1f}s", (20, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+
         self.cam_label.setPixmap(frame_to_pixmap(frame))
 
-    # Serial / Radar
+    # ---- Serial / Radar ----
     def serial_tick(self):
         if self.ser is None:
             return
@@ -437,11 +469,9 @@ class MainWindow(QMainWindow):
 
         a, d = self.parser.feed(line)
 
-        # si on reçoit angle seul -> on garde
         if a is not None:
             self.last_angle_raw = a
 
-        # smoothing distance
         if d is not None:
             self.dist_history.append(d)
             valid = [x for x in self.dist_history if x is not None]
@@ -449,7 +479,6 @@ class MainWindow(QMainWindow):
             if smooth is not None:
                 self.last_distance = smooth
 
-        # update radar (même si angle ou distance arrive séparément)
         self.radar_widget.update_data(self.last_angle_raw, self.last_distance)
 
         if SHOW_DEBUG:
@@ -457,7 +486,6 @@ class MainWindow(QMainWindow):
                 f"RAW: {line}\nparsed: angle={a}  dist={d}\nkept: angle_raw={self.last_angle_raw}  dist_smooth={self.last_distance}"
             )
 
-        # auto camera
         if not self.auto_cam_check.isChecked():
             return
 
