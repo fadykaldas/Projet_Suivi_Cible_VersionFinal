@@ -1,0 +1,20 @@
+{
+  "baud": 115200,
+  "serial_timeout_sec": 0.05,
+  "on_threshold_cm": 60.0,
+  "off_threshold_cm": 70.0,
+  "trigger_confirm_sec": 2.0,
+  "cam_close_after_radar_loss": 10.0,
+  "cam_index": 0,
+  "hold_seconds": 2.0,
+  "detect_every_n_frames": 2,
+  "radar_max_range_cm": 200.0,
+  "point_ttl_sec": 2.0,
+  "sweep_trail": 18,
+  "servo_min_angle": 0.0,
+  "servo_max_angle": 180.0,
+  "radar_flip": true,
+  "radar_offset_deg": 0.0,
+  "auto_camera_from_radar": true,
+  "opencv_detect": true
+}
