@@ -523,7 +523,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(act_exit)
 
         view_menu.addAction(QAction("Home", self, triggered=self.goto_home))
-        view_menu.addAction(QAction("Live", self, triggered=self.goto_live))
+        view_menu.addAction(QAction("Radar", self, triggered=self.goto_live))
         view_menu.addAction(QAction("Settings", self, triggered=self.goto_settings))
         help_menu.addAction(QAction("About", self, triggered=self.goto_about))
 
@@ -553,7 +553,7 @@ class MainWindow(QMainWindow):
         lay.addSpacing(8)
 
         self.btn_home = self._nav_button("  🏠  Home", self.goto_home)
-        self.btn_live = self._nav_button("  📡  Live", self.goto_live)
+        self.btn_live = self._nav_button("  📡  Radar", self.goto_live)
         self.btn_face_tracking = self._nav_button("  🎯  Face Tracking", self.goto_face_tracking)
         self.btn_measure = self._nav_button("  📏  Mesure d'objet", self.goto_measure)
         self.btn_object_detection = self._nav_button("  🔎  Object Detection", self.goto_object_detection)
@@ -1055,7 +1055,7 @@ class MainWindow(QMainWindow):
         h.addWidget(msg)
 
         btn_row = QHBoxLayout()
-        b1 = QPushButton("Go to Live")
+        b1 = QPushButton("Go to Radar")
         b1.clicked.connect(self.goto_live)
         b2 = QPushButton("Open Settings")
         b2.setObjectName("SecondaryBtn")
@@ -1226,7 +1226,7 @@ class MainWindow(QMainWindow):
 
     def goto_live(self):
         self.pages.setCurrentIndex(1)
-        self.lbl_title.setText("Live")
+        self.lbl_title.setText("Radar")
         self.lbl_sub.setText("Radar en temps réel + caméra + OpenCV")
         self._set_nav_checked("btn_live")
 
