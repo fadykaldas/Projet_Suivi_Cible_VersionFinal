@@ -1,5 +1,7 @@
 1. DESCRIPTION DU PROJET
+   
 1.1 L'équipe
+   
 Notre équipe est composée de trois étudiants aux compétences complémentaires en programmation, électronique et sciences appliquées.
 Karl Kandakji – Responsable matériel et électronique Arduino
 •	Assemblage du radar (servomoteur + capteur HC-SR04)
@@ -19,7 +21,9 @@ Fady Kaldas – Responsable logiciel principal et vision artificielle
 Cette répartition permet un travail en parallèle tout en assurant une intégration cohérente du système.
  
 1.2 L'idée
+
 Problématique
+
 Comment concevoir un système automatisé capable de :
 •	Détecter la présence d'un objet dans son environnement
 •	Confirmer visuellement cette présence avec une caméra
@@ -34,11 +38,16 @@ Objectifs du projet
 •	Concevoir un système stable, fiable et adapté au niveau collégial
  
 1.3 L'utilité
+
 À quoi sert le système
+
 Ce projet simule le fonctionnement d'un système de surveillance automatisé multi-capteurs similaire à ceux utilisés en robotique, en automatisation industrielle ou en systèmes de sécurité intelligents.
 Le système scanne automatiquement une zone de 180° avec un radar ultrasonique. Dès qu'un objet est détecté à moins de 50 cm, la caméra s'active automatiquement et encadre l'objet avec un rectangle rouge grâce à OpenCV. Tout est affiché en temps réel dans une interface graphique montrant le radar et la vidéo.
+
 Problème réel résolu
+
 Dans les systèmes de surveillance réels, il est important de :
+
 •	Réduire les fausses alarmes (faux positifs)
 •	Confirmer une détection avant de déclencher une action
 •	Économiser les ressources (la caméra ne tourne pas en continu)
@@ -46,12 +55,16 @@ Dans les systèmes de surveillance réels, il est important de :
 Notre projet illustre cette chaîne décisionnelle de manière simplifiée, éducative et reproductible.
  
 1.4 L'innovation
+
 Nouveauté du projet
+
 L'innovation repose sur la combinaison intelligente de deux technologies :
 •	Un radar ultrason pour la détection large : Le servomoteur fait tourner le capteur HC-SR04 pour scanner 180° en continu
 •	Une vision artificielle (OpenCV) pour la validation précise : La caméra s'active uniquement quand le radar détecte quelque chose, ce qui optimise les ressources
+
 Valeur ajoutée
-•	Architecture modulaire : Séparation claire entre Arduino (hardware), Python (traitement) et PyQt5 (interface)
+
+•	Architecture modulaire : Séparation claire entre Arduino (hardware), Python (traitement) et PyQt6 (interface)
 •	Double validation : Radar + Caméra pour réduire les erreurs
 •	Activation intelligente : Économie de ressources (caméra active seulement si nécessaire)
 •	Interface temps réel : Visualisation simultanée du radar et de la caméra
@@ -80,7 +93,7 @@ Informatique
 •	Programmation Python (structures de données, POO, threading)
 •	Vision artificielle avec OpenCV (détection de mouvement, contours)
 •	Communication série (protocole, parsing de données)
-•	Interfaces graphiques avec PyQt5 (widgets, events, painting)
+•	Interfaces graphiques avec PyQt6 (widgets, events, painting)
 •	Architecture logicielle (UML, modularité, séparation des préoccupations)
 Mathématiques
 •	Trigonométrie (conversion angle/distance → coordonnées x,y)
@@ -112,6 +125,7 @@ Outils collaboratifs
 •	Google Docs : Documentation partagée
  
 2.2 Justification des choix
+   
 •	Arduino : Simple, fiable et idéal pour le contrôle matériel. Grande communauté et documentation abondante.
 •	Python : Adapté à la vision artificielle. Syntaxe claire et bibliothèques puissantes.
 •	OpenCV : Bibliothèque standard en traitement d'image, gratuite et très documentée.
@@ -119,7 +133,9 @@ Outils collaboratifs
 •	VS Code : Un seul environnement pour Arduino et Python. Gratuit et léger.
 •	Git/GitHub : Gestion efficace du travail en équipe. Historique complet des modifications.
 Ces choix permettent une architecture claire séparant intelligence logicielle (Python) et contrôle physique (Arduino).
+
 2.3 Défis et difficultés
+
 •	Apprentissage de la vision artificielle : OpenCV nécessite de comprendre le traitement d'image (background subtraction, contours)
 •	Synchronisation capteur/caméra : Coordonner Arduino et Python en temps réel sans décalage
 •	Threading : Empêcher l'interface de se bloquer pendant la lecture série et capture vidéo
@@ -128,21 +144,29 @@ Ces choix permettent une architecture claire séparant intelligence logicielle (
 •	Intégration matérielle/logicielle : Faire communiquer correctement toutes les parties du système
 Ces défis contribuent à l'apprentissage technique et à la compréhension des systèmes embarqués.
  
-3. PLAN DE TRAVAIL EN ÉQUIPE
+4. PLAN DE TRAVAIL EN ÉQUIPE
+
 3.1 Répartition des tâches
+
 •	Karl Kandakji : Développement matériel et Arduino (~200 lignes C++)
 •	Sarim Siddiqui : Interface graphique PyQt5 (~600-800 lignes Python)
 •	Fady Kaldas : Communication série et vision OpenCV (~500-700 lignes Python)
+
 3.2 Échéancier
+
 Voir le diagramme de Gantt en annexe. Le projet s'étale sur 6 semaines (Semaine 4 à Semaine 9) :
+
 Semaine 4 : Système caméra + détection OpenCV
 Semaine 5 : Interface graphique complète (radar + caméra)
 Semaine 6 : Tests et corrections
 Semaine 7 : Améliorations avancées
 Semaine 8 : Documentation complète
 Semaine 9 : Présentation finale
+
 3.3 Analyse du projet
+
 Enjeux
+
 •	Intégration multi-capteurs (radar + caméra)
 •	Synchronisation matériel/logiciel en temps réel
 •	Performance (30 FPS minimum)
@@ -154,7 +178,9 @@ Contraintes
 •	Limites techniques du matériel (précision capteur, qualité webcam)
  
 3.4 Modélisation UML
+
 Voir le diagramme UML complet en annexe. Le système est organisé en 6 modules principaux :
+
 •	Arduino (Hardware) : RadarSystem, UltrasonicSensor, ServoMotor, SerialCommunication
 •	Communication : ArduinoHandler (gestion port série)
 •	Interface Principale : MainWindow (fenêtre 1200×600)
@@ -167,11 +193,14 @@ L'interface graphique est divisée en trois zones principales affichées simulta
 •	Zone Caméra (droite) : Flux vidéo 30 FPS avec rectangles rouges autour des objets détectés
 •	Panneau de Contrôle (bas) : Boutons (Connecter, Démarrer, Enregistrer), slider seuil de détection, barre de statut
  
-4. CONCLUSION
+5. CONCLUSION
+
 Ce projet démontre l'intégration réussie d'un capteur ultrasonique, d'une caméra intelligente et d'une interface graphique moderne dans un système de surveillance automatisé. 
 Nous avons conçu un système capable de scanner automatiquement une zone de 180°, de détecter les objets proches, d'activer une caméra intelligemment et d'encadrer visuellement les cibles en temps réel. Le tout est affiché dans une interface professionnelle montrant simultanément le radar et la vidéo.
 Le projet illustre concrètement comment l'électronique (Arduino, capteurs), la programmation (Python, C++), les mathématiques (trigonométrie, coordonnées) et la physique (ondes ultrasonores) peuvent travailler ensemble pour créer un système intelligent, accessible et éducatif.
+
 Compétences acquises :
+
 •	Programmation embarquée avec Arduino
 •	Vision artificielle avec OpenCV
 •	Interfaces graphiques professionnelles avec PyQt5
@@ -186,6 +215,7 @@ Extensions possibles :
 •	Notifications par email/SMS
  
 ANNEXES
+
 Annexe A : Diagramme de Gantt
 (Voir fichier Excel : Gantt_Projet_Radar_Surveillance.xlsx)
 Annexe B : Diagramme UML
