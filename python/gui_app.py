@@ -62,6 +62,12 @@ class AppConfig:
     target_object: str = "cell phone"
     object_confidence: float = 0.25
 
+    trajectory_enabled: bool = True
+    trajectory_history_len: int = 12
+    trajectory_prediction_steps: int = 6
+    trajectory_step_sec: float = 0.20
+    trajectory_min_dt: float = 0.001
+
     def save(self, path: Path = CONFIG_PATH):
         path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
 
@@ -209,18 +215,11 @@ class SerialParser:
     def __init__(self):
         self.pending_angle = None
 
-    def feed(self, packet: str):
-        if not packet:
+    def feed(self, line: str):
+        if not line:
             return None, None
-        s = packet.strip()
+        s = line.strip()
         low = s.lower()
-
-        # Arduino + Processing format: "angle,distance."
-        m = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$", s)
-        if m:
-            self.pending_angle = None
-            return float(m.group(1)), float(m.group(2))
-
         nums = re.findall(r"\d+(?:\.\d+)?", s)
         if not nums:
             return None, None
@@ -258,16 +257,9 @@ class RadarWidget(QWidget):
 
         self.last_angle = 90.0
         self.last_distance = None
-        self.target_sweep_angle = 90.0
-        self.current_sweep_angle = 90.0
-        self._last_anim_ts = time.time()
 
         self.sweep_angles = deque(maxlen=self.cfg.sweep_trail)
         self.points = deque(maxlen=600)  # (angle, dist, timestamp)
-
-        self.anim_timer = QTimer(self)
-        self.anim_timer.timeout.connect(self._animate_sweep)
-        self.anim_timer.start(16)
 
     def update_config(self, cfg: AppConfig):
         self.cfg = cfg
@@ -289,34 +281,15 @@ class RadarWidget(QWidget):
 
         if angle_raw is not None:
             self.last_angle = self.map_angle(angle_raw)
-            self.target_sweep_angle = self.last_angle
-
-            if not self.sweep_angles:
-                self.current_sweep_angle = self.last_angle
-                self.sweep_angles.appendleft(self.current_sweep_angle)
+            self.sweep_angles.appendleft(self.last_angle)
+        else:
+            self.sweep_angles.appendleft(self.last_angle)
 
         if dist_cm is not None:
             self.last_distance = float(dist_cm)
             if 0.0 < self.last_distance <= self.cfg.radar_max_range_cm:
                 self.points.append((self.last_angle, self.last_distance, now))
 
-        self.update()
-
-    def _animate_sweep(self):
-        now = time.time()
-        dt = min(0.06, max(0.001, now - self._last_anim_ts))
-        self._last_anim_ts = now
-
-        delta = self.target_sweep_angle - self.current_sweep_angle
-        max_speed_deg_s = 420.0
-        max_step = max_speed_deg_s * dt
-
-        if abs(delta) <= max_step:
-            self.current_sweep_angle = self.target_sweep_angle
-        else:
-            self.current_sweep_angle += max_step if delta > 0 else -max_step
-
-        self.sweep_angles.appendleft(self.current_sweep_angle)
         self.update()
 
     def paintEvent(self, event):
@@ -401,7 +374,6 @@ class MainWindow(QMainWindow):
 
         # runtime state
         self.ser = None
-        self.serial_buffer = ""
         self.parser = SerialParser()
         self.last_angle_raw = None
         self.last_distance = None
@@ -445,6 +417,11 @@ class MainWindow(QMainWindow):
         self.last_det_boxes = []  # list of (x1,y1,x2,y2,label,is_target)
         self.last_det_ts = 0.0
         self.det_box_ttl = 0.6  # seconds
+
+        # Predictive trajectory state
+        self.target_track = deque(maxlen=self.cfg.trajectory_history_len)  # (cx, cy, t)
+        self.predicted_points = []
+        self.last_target_center = None
 
         self._build_menubar()
 
@@ -557,7 +534,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(act_exit)
 
         view_menu.addAction(QAction("Home", self, triggered=self.goto_home))
-        view_menu.addAction(QAction("Radar", self, triggered=self.goto_live))
+        view_menu.addAction(QAction("Live", self, triggered=self.goto_live))
         view_menu.addAction(QAction("Settings", self, triggered=self.goto_settings))
         help_menu.addAction(QAction("About", self, triggered=self.goto_about))
 
@@ -587,7 +564,7 @@ class MainWindow(QMainWindow):
         lay.addSpacing(8)
 
         self.btn_home = self._nav_button("  🏠  Home", self.goto_home)
-        self.btn_live = self._nav_button("  📡  Radar", self.goto_live)
+        self.btn_live = self._nav_button("  📡  Live", self.goto_live)
         self.btn_face_tracking = self._nav_button("  🎯  Face Tracking", self.goto_face_tracking)
         self.btn_measure = self._nav_button("  📏  Mesure d'objet", self.goto_measure)
         self.btn_object_detection = self._nav_button("  🔎  Object Detection", self.goto_object_detection)
@@ -1089,7 +1066,7 @@ class MainWindow(QMainWindow):
         h.addWidget(msg)
 
         btn_row = QHBoxLayout()
-        b1 = QPushButton("Go to Radar")
+        b1 = QPushButton("Go to Live")
         b1.clicked.connect(self.goto_live)
         b2 = QPushButton("Open Settings")
         b2.setObjectName("SecondaryBtn")
@@ -1140,16 +1117,11 @@ class MainWindow(QMainWindow):
         self.s_off = QDoubleSpinBox(); self.s_off.setRange(1, 400); self.s_off.setSuffix(" cm")
         self.s_trigger = QDoubleSpinBox(); self.s_trigger.setRange(0.1, 10.0); self.s_trigger.setSingleStep(0.1); self.s_trigger.setSuffix(" s")
         self.s_close = QDoubleSpinBox(); self.s_close.setRange(0.1, 60.0); self.s_close.setSingleStep(0.5); self.s_close.setSuffix(" s")
-        self.s_baud = QComboBox()
-        for b in (9600, 19200, 38400, 57600, 115200):
-            self.s_baud.addItem(str(b), b)
-        self.s_baud.setToolTip("Doit correspondre au Serial.begin(...) dans le sketch Arduino")
 
         gl.addWidget(QLabel("ON threshold"), 0, 0); gl.addWidget(self.s_on, 0, 1)
         gl.addWidget(QLabel("OFF threshold"), 1, 0); gl.addWidget(self.s_off, 1, 1)
         gl.addWidget(QLabel("Confirm time"), 2, 0); gl.addWidget(self.s_trigger, 2, 1)
         gl.addWidget(QLabel("Close after loss"), 3, 0); gl.addWidget(self.s_close, 3, 1)
-        gl.addWidget(QLabel("Serial baud"), 4, 0); gl.addWidget(self.s_baud, 4, 1)
 
         row.addWidget(card("Automation", logic), 1)
 
@@ -1265,18 +1237,18 @@ class MainWindow(QMainWindow):
 
     def goto_live(self):
         self.pages.setCurrentIndex(1)
-        self.lbl_title.setText("Radar")
+        self.lbl_title.setText("Live")
         self.lbl_sub.setText("Radar en temps réel + caméra + OpenCV")
         self._set_nav_checked("btn_live")
 
     def goto_settings(self):
-        self.pages.setCurrentIndex(4)
+        self.pages.setCurrentIndex(5)
         self.lbl_title.setText("Settings")
         self.lbl_sub.setText("Seuils • calibration • performance • config")
         self._set_nav_checked("btn_settings")
 
     def goto_about(self):
-        self.pages.setCurrentIndex(5)
+        self.pages.setCurrentIndex(6)
         self.lbl_title.setText("About")
         self.lbl_sub.setText("Infos du projet")
         self._set_nav_checked("btn_about")
@@ -1318,7 +1290,6 @@ class MainWindow(QMainWindow):
                 self.ser.reset_input_buffer()
             except Exception:
                 pass
-            self.serial_buffer = ""
             self.parser = SerialParser()
             self.btn_connect.setText("Disconnect")
             self._set_connection_pill(True)
@@ -1341,7 +1312,6 @@ class MainWindow(QMainWindow):
 
         self.last_angle_raw = None
         self.last_distance = None
-        self.serial_buffer = ""
         self.dist_history.clear()
         self.state = "idle"
         self.detect_start = None
@@ -1364,6 +1334,9 @@ class MainWindow(QMainWindow):
         self.target_start = None
         self.last_det_boxes = []
         self.last_det_ts = 0.0
+        self.target_track.clear()
+        self.predicted_points = []
+        self.last_target_center = None
 
 
     def close_camera(self):
@@ -1377,6 +1350,114 @@ class MainWindow(QMainWindow):
         self.cam_label.setText("Camera stopped")
         self.target_start = None
         self.last_frame_bgr = None
+        self.target_track.clear()
+        self.predicted_points = []
+        self.last_target_center = None
+
+    def _get_target_center_from_boxes(self):
+        """
+        Retourne le centre (cx, cy) de la plus grande box correspondant
+        à l'objet cible actuellement détecté.
+        """
+        target_boxes = [b for b in self.last_det_boxes if b[5]]
+        if not target_boxes:
+            return None
+
+        best_box = max(target_boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+        x1, y1, x2, y2, label, is_target = best_box
+        cx = (x1 + x2) // 2
+        cy = (y1 + y2) // 2
+        return (cx, cy)
+
+    def _update_trajectory(self, center, now):
+        """
+        Met à jour l'historique de trajectoire et prédit les prochains points.
+
+        Formules:
+            vx = dx / dt
+            vy = dy / dt
+            x_f = x + vx * t
+            y_f = y + vy * t
+        """
+        self.predicted_points = []
+
+        if center is None:
+            return
+
+        self.target_track.append((center[0], center[1], now))
+        self.last_target_center = center
+
+        if len(self.target_track) < 2:
+            return
+
+        x1, y1, t1 = self.target_track[-2]
+        x2, y2, t2 = self.target_track[-1]
+
+        dt = max(t2 - t1, self.cfg.trajectory_min_dt)
+        vx = (x2 - x1) / dt
+        vy = (y2 - y1) / dt
+
+        max_speed_px_per_sec = 2000.0
+        speed = math.sqrt(vx * vx + vy * vy)
+        if speed > max_speed_px_per_sec:
+            return
+
+        for i in range(1, self.cfg.trajectory_prediction_steps + 1):
+            tf = i * self.cfg.trajectory_step_sec
+            xf = int(x2 + vx * tf)
+            yf = int(y2 + vy * tf)
+            self.predicted_points.append((xf, yf))
+
+    def _draw_trajectory_overlay(self, frame):
+        """
+        Dessine:
+        - l'historique du mouvement
+        - la flèche de direction
+        - les points futurs prédits
+        """
+        if len(self.target_track) >= 2:
+            pts = [(int(x), int(y)) for x, y, _ in self.target_track]
+            for i in range(1, len(pts)):
+                thickness = max(1, 4 - (len(pts) - i) // 3)
+                cv2.line(frame, pts[i - 1], pts[i], (255, 200, 0), thickness)
+
+        if len(self.target_track) >= 2:
+            x1, y1, _ = self.target_track[-2]
+            x2, y2, _ = self.target_track[-1]
+
+            cv2.arrowedLine(
+                frame,
+                (int(x1), int(y1)),
+                (int(x2), int(y2)),
+                (0, 255, 255),
+                3,
+                tipLength=0.25
+            )
+
+            dt = max(self.target_track[-1][2] - self.target_track[-2][2], self.cfg.trajectory_min_dt)
+            vx = (x2 - x1) / dt
+            vy = (y2 - y1) / dt
+            speed = math.sqrt(vx * vx + vy * vy)
+
+            cv2.putText(
+                frame,
+                f"Vitesse: {speed:.1f} px/s",
+                (int(x2) + 10, int(y2) + 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2
+            )
+
+        for i, (xf, yf) in enumerate(self.predicted_points):
+            if 0 <= xf < frame.shape[1] and 0 <= yf < frame.shape[0]:
+                radius = max(2, 6 - i // 2)
+                cv2.circle(frame, (xf, yf), radius, (255, 0, 255), -1)
+
+        if self.last_target_center is not None and self.predicted_points:
+            x0, y0 = self.last_target_center
+            x1, y1 = self.predicted_points[0]
+            cv2.line(frame, (int(x0), int(y0)), (int(x1), int(y1)), (255, 0, 255), 2)
 
     # ---------- SCREENSHOTS (PRO FEATURE) ----------
     def _timestamp(self):
@@ -1438,7 +1519,7 @@ class MainWindow(QMainWindow):
             if self.detector_frame_count % max(1, int(self.cfg.detect_every_n_frames)) == 0:
                 # Use YOLOv8 to detect objects (e.g. "cell phone")
                 if self.yolo is not None:
-                    results = self.yolo(frame, verbose=False)
+                    results = self.yolo(frame, verbose=False, conf=self.cfg.object_confidence)
                     detections = results[0]
 
                     # Store detected boxes so we can keep them on-screen for a short time
@@ -1480,8 +1561,13 @@ class MainWindow(QMainWindow):
             faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=4)
             detected_obj = (len(faces) > 0)
 
+            self.last_det_boxes = []
             for (x, y, w, h) in faces:
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (34, 197, 94), 2)
+                x1, y1, x2, y2 = x, y, x + w, y + h
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (34, 197, 94), 2)
+                self.last_det_boxes.append((x1, y1, x2, y2, "face", True))
+            if detected_obj:
+                self.last_det_ts = now
 
             if detected_obj:
                 if self.target_start is None:
@@ -1491,6 +1577,11 @@ class MainWindow(QMainWindow):
                 self.target_start = None
                 elapsed = 0.0
 
+        # Predictive trajectory
+        if self.cfg.trajectory_enabled:
+            target_center = self._get_target_center_from_boxes()
+            self._update_trajectory(target_center, now)
+            self._draw_trajectory_overlay(frame)
 
         dist_text = f"Dist: {self.last_distance:.1f} cm" if self.last_distance is not None else "Dist: N/A"
         cv2.putText(frame, dist_text, (16, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (226, 232, 240), 2)
@@ -1511,8 +1602,15 @@ class MainWindow(QMainWindow):
         if detected_obj and elapsed >= self.cfg.hold_seconds:
             cv2.putText(frame, "CIBLE DETECTEE", (16, 110), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (239, 68, 68), 3)
         else:
-            cv2.putText(frame, f"Hold: {elapsed:.1f}s/{self.cfg.hold_seconds:.1f}s", (16, 110),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (226, 232, 240), 2)
+            cv2.putText(
+                frame,
+                f"Hold: {elapsed:.1f}s/{self.cfg.hold_seconds:.1f}s",
+                (16, 110),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (226, 232, 240),
+                2
+            )
 
         # store the last frame for saving
         self.last_frame_bgr = frame.copy()
@@ -1524,62 +1622,26 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            waiting = int(getattr(self.ser, "in_waiting", 0))
-            if waiting <= 0:
+            if getattr(self.ser, "in_waiting", 0) <= 0:
                 return
-            chunk = self.ser.read(waiting).decode(errors="replace")
+            line = self.ser.readline().decode(errors="replace").strip()
         except Exception:
             return
 
-        self.serial_buffer += chunk
-        if len(self.serial_buffer) > 8192:
-            self.serial_buffer = self.serial_buffer[-4096:]
+        a, d = self.parser.feed(line)
 
-        had_update = False
+        if a is not None:
+            self.last_angle_raw = a
 
-        def process_message(msg: str):
-            nonlocal had_update
-            a, d = self.parser.feed(msg)
+        if d is not None:
+            self.dist_history.append(d)
+            valid = [x for x in self.dist_history if x is not None]
+            smooth = statistics.median(valid) if valid else None
+            if smooth is not None:
+                self.last_distance = smooth
 
-            if a is not None:
-                self.last_angle_raw = a
-
-            if d is not None:
-                if d > 0:
-                    self.dist_history.append(d)
-                    valid = [x for x in self.dist_history if x is not None and x > 0]
-                    smooth = statistics.median(valid) if valid else None
-                    if smooth is not None:
-                        self.last_distance = smooth
-                else:
-                    # HC-SR04 often returns -1 or 0 when no echo is received.
-                    self.last_distance = None
-
-            if (a is not None) or (d is not None):
-                self.radar_widget.update_data(self.last_angle_raw, self.last_distance)
-                had_update = True
-
-        # Support Processing-style stream: "angle,distance." packets.
-        if ("," in self.serial_buffer) and ("." in self.serial_buffer):
-            packets = self.serial_buffer.split(".")
-            self.serial_buffer = packets.pop() if packets else ""
-            for packet in packets:
-                packet = packet.strip()
-                if packet:
-                    process_message(packet)
-
-        # Support line-based stream: Serial.println(...)
-        elif ("\n" in self.serial_buffer) or ("\r" in self.serial_buffer):
-            normalized = self.serial_buffer.replace("\r", "\n")
-            lines = normalized.split("\n")
-            self.serial_buffer = lines.pop() if lines else ""
-            for line in lines:
-                line = line.strip()
-                if line:
-                    process_message(line)
-
-        if not had_update:
-            self.radar_widget.update_data(self.last_angle_raw, self.last_distance)
+        self.radar_widget.update_config(self.cfg)
+        self.radar_widget.update_data(self.last_angle_raw, self.last_distance)
 
         self.cfg.auto_camera_from_radar = self.chk_auto_cam.isChecked()
         self.cfg.opencv_detect = self.chk_detect.isChecked()
@@ -1622,11 +1684,6 @@ class MainWindow(QMainWindow):
         self.chk_auto_cam.setChecked(bool(self.cfg.auto_camera_from_radar))
         self.chk_detect.setChecked(bool(self.cfg.opencv_detect))
 
-        if hasattr(self, "s_baud"):
-            idx = self.s_baud.findData(int(self.cfg.baud))
-            if idx >= 0:
-                self.s_baud.setCurrentIndex(idx)
-
         self.s_on.setValue(float(self.cfg.on_threshold_cm))
         self.s_off.setValue(float(self.cfg.off_threshold_cm))
         self.s_trigger.setValue(float(self.cfg.trigger_confirm_sec))
@@ -1649,9 +1706,6 @@ class MainWindow(QMainWindow):
         self._set_connection_pill(self.ser is not None)
 
     def apply_settings(self):
-        if hasattr(self, "s_baud"):
-            self.cfg.baud = int(self.s_baud.currentData())
-
         self.cfg.on_threshold_cm = float(self.s_on.value())
         self.cfg.off_threshold_cm = float(self.s_off.value())
         self.cfg.trigger_confirm_sec = float(self.s_trigger.value())
