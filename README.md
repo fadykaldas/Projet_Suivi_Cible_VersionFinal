@@ -9,7 +9,7 @@ Karl Kandakji – Responsable matériel et électronique Arduino
 •	Calibration du système et tests de précision
 •	Gestion de l'alimentation et sécurité électrique
 Sarim Siddiqui – Responsable interface graphique et analyse
-•	Interface graphique PyQt5 (radar + caméra)
+•	Interface graphique PyQt6 (radar + caméra)
 •	Widget radar avec visualisation temps réel
 •	Analyse mathématique (angles, coordonnées, seuils)
 •	Documentation UML et présentation
@@ -116,7 +116,7 @@ IDE
 •	Extension Arduino pour VS Code : Upload et débogage du code Arduino
 Bibliothèques principales
 •	OpenCV : Traitement d'image et détection de mouvement
-•	PyQt5 : Interface graphique moderne et widgets personnalisés
+•	PYQt6 : Interface graphique moderne et widgets personnalisés
 •	PySerial : Communication série Arduino ↔ Python
 •	NumPy : Calculs mathématiques et traitement de données
 Outils collaboratifs
@@ -149,7 +149,7 @@ Ces défis contribuent à l'apprentissage technique et à la compréhension des 
 3.1 Répartition des tâches
 
 •	Karl Kandakji : Développement matériel et Arduino (~200 lignes C++)
-•	Sarim Siddiqui : Interface graphique PyQt5 (~600-800 lignes Python)
+•	Sarim Siddiqui : Interface graphique PYQt6 (~600-800 lignes Python)
 •	Fady Kaldas : Communication série et vision OpenCV (~500-700 lignes Python)
 
 3.2 Échéancier
@@ -203,7 +203,7 @@ Compétences acquises :
 
 •	Programmation embarquée avec Arduino
 •	Vision artificielle avec OpenCV
-•	Interfaces graphiques professionnelles avec PyQt5
+•	Interfaces graphiques professionnelles avec PYQt6
 •	Communication série et synchronisation temps réel
 •	Architecture logicielle modulaire
 •	Travail en équipe avec Git/GitHub
