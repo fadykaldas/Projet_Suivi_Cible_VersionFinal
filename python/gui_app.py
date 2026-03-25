@@ -209,11 +209,18 @@ class SerialParser:
     def __init__(self):
         self.pending_angle = None
 
-    def feed(self, line: str):
-        if not line:
+    def feed(self, packet: str):
+        if not packet:
             return None, None
-        s = line.strip()
+        s = packet.strip()
         low = s.lower()
+
+        # Arduino + Processing format: "angle,distance."
+        m = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$", s)
+        if m:
+            self.pending_angle = None
+            return float(m.group(1)), float(m.group(2))
+
         nums = re.findall(r"\d+(?:\.\d+)?", s)
         if not nums:
             return None, None
@@ -251,9 +258,16 @@ class RadarWidget(QWidget):
 
         self.last_angle = 90.0
         self.last_distance = None
+        self.target_sweep_angle = 90.0
+        self.current_sweep_angle = 90.0
+        self._last_anim_ts = time.time()
 
         self.sweep_angles = deque(maxlen=self.cfg.sweep_trail)
         self.points = deque(maxlen=600)  # (angle, dist, timestamp)
+
+        self.anim_timer = QTimer(self)
+        self.anim_timer.timeout.connect(self._animate_sweep)
+        self.anim_timer.start(16)
 
     def update_config(self, cfg: AppConfig):
         self.cfg = cfg
@@ -275,15 +289,34 @@ class RadarWidget(QWidget):
 
         if angle_raw is not None:
             self.last_angle = self.map_angle(angle_raw)
-            self.sweep_angles.appendleft(self.last_angle)
-        else:
-            self.sweep_angles.appendleft(self.last_angle)
+            self.target_sweep_angle = self.last_angle
+
+            if not self.sweep_angles:
+                self.current_sweep_angle = self.last_angle
+                self.sweep_angles.appendleft(self.current_sweep_angle)
 
         if dist_cm is not None:
             self.last_distance = float(dist_cm)
             if 0.0 < self.last_distance <= self.cfg.radar_max_range_cm:
                 self.points.append((self.last_angle, self.last_distance, now))
 
+        self.update()
+
+    def _animate_sweep(self):
+        now = time.time()
+        dt = min(0.06, max(0.001, now - self._last_anim_ts))
+        self._last_anim_ts = now
+
+        delta = self.target_sweep_angle - self.current_sweep_angle
+        max_speed_deg_s = 420.0
+        max_step = max_speed_deg_s * dt
+
+        if abs(delta) <= max_step:
+            self.current_sweep_angle = self.target_sweep_angle
+        else:
+            self.current_sweep_angle += max_step if delta > 0 else -max_step
+
+        self.sweep_angles.appendleft(self.current_sweep_angle)
         self.update()
 
     def paintEvent(self, event):
@@ -368,6 +401,7 @@ class MainWindow(QMainWindow):
 
         # runtime state
         self.ser = None
+        self.serial_buffer = ""
         self.parser = SerialParser()
         self.last_angle_raw = None
         self.last_distance = None
@@ -1106,11 +1140,16 @@ class MainWindow(QMainWindow):
         self.s_off = QDoubleSpinBox(); self.s_off.setRange(1, 400); self.s_off.setSuffix(" cm")
         self.s_trigger = QDoubleSpinBox(); self.s_trigger.setRange(0.1, 10.0); self.s_trigger.setSingleStep(0.1); self.s_trigger.setSuffix(" s")
         self.s_close = QDoubleSpinBox(); self.s_close.setRange(0.1, 60.0); self.s_close.setSingleStep(0.5); self.s_close.setSuffix(" s")
+        self.s_baud = QComboBox()
+        for b in (9600, 19200, 38400, 57600, 115200):
+            self.s_baud.addItem(str(b), b)
+        self.s_baud.setToolTip("Doit correspondre au Serial.begin(...) dans le sketch Arduino")
 
         gl.addWidget(QLabel("ON threshold"), 0, 0); gl.addWidget(self.s_on, 0, 1)
         gl.addWidget(QLabel("OFF threshold"), 1, 0); gl.addWidget(self.s_off, 1, 1)
         gl.addWidget(QLabel("Confirm time"), 2, 0); gl.addWidget(self.s_trigger, 2, 1)
         gl.addWidget(QLabel("Close after loss"), 3, 0); gl.addWidget(self.s_close, 3, 1)
+        gl.addWidget(QLabel("Serial baud"), 4, 0); gl.addWidget(self.s_baud, 4, 1)
 
         row.addWidget(card("Automation", logic), 1)
 
@@ -1279,6 +1318,7 @@ class MainWindow(QMainWindow):
                 self.ser.reset_input_buffer()
             except Exception:
                 pass
+            self.serial_buffer = ""
             self.parser = SerialParser()
             self.btn_connect.setText("Disconnect")
             self._set_connection_pill(True)
@@ -1301,6 +1341,7 @@ class MainWindow(QMainWindow):
 
         self.last_angle_raw = None
         self.last_distance = None
+        self.serial_buffer = ""
         self.dist_history.clear()
         self.state = "idle"
         self.detect_start = None
@@ -1483,26 +1524,62 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            if getattr(self.ser, "in_waiting", 0) <= 0:
+            waiting = int(getattr(self.ser, "in_waiting", 0))
+            if waiting <= 0:
                 return
-            line = self.ser.readline().decode(errors="replace").strip()
+            chunk = self.ser.read(waiting).decode(errors="replace")
         except Exception:
             return
 
-        a, d = self.parser.feed(line)
+        self.serial_buffer += chunk
+        if len(self.serial_buffer) > 8192:
+            self.serial_buffer = self.serial_buffer[-4096:]
 
-        if a is not None:
-            self.last_angle_raw = a
+        had_update = False
 
-        if d is not None:
-            self.dist_history.append(d)
-            valid = [x for x in self.dist_history if x is not None]
-            smooth = statistics.median(valid) if valid else None
-            if smooth is not None:
-                self.last_distance = smooth
+        def process_message(msg: str):
+            nonlocal had_update
+            a, d = self.parser.feed(msg)
 
-        self.radar_widget.update_config(self.cfg)
-        self.radar_widget.update_data(self.last_angle_raw, self.last_distance)
+            if a is not None:
+                self.last_angle_raw = a
+
+            if d is not None:
+                if d > 0:
+                    self.dist_history.append(d)
+                    valid = [x for x in self.dist_history if x is not None and x > 0]
+                    smooth = statistics.median(valid) if valid else None
+                    if smooth is not None:
+                        self.last_distance = smooth
+                else:
+                    # HC-SR04 often returns -1 or 0 when no echo is received.
+                    self.last_distance = None
+
+            if (a is not None) or (d is not None):
+                self.radar_widget.update_data(self.last_angle_raw, self.last_distance)
+                had_update = True
+
+        # Support Processing-style stream: "angle,distance." packets.
+        if ("," in self.serial_buffer) and ("." in self.serial_buffer):
+            packets = self.serial_buffer.split(".")
+            self.serial_buffer = packets.pop() if packets else ""
+            for packet in packets:
+                packet = packet.strip()
+                if packet:
+                    process_message(packet)
+
+        # Support line-based stream: Serial.println(...)
+        elif ("\n" in self.serial_buffer) or ("\r" in self.serial_buffer):
+            normalized = self.serial_buffer.replace("\r", "\n")
+            lines = normalized.split("\n")
+            self.serial_buffer = lines.pop() if lines else ""
+            for line in lines:
+                line = line.strip()
+                if line:
+                    process_message(line)
+
+        if not had_update:
+            self.radar_widget.update_data(self.last_angle_raw, self.last_distance)
 
         self.cfg.auto_camera_from_radar = self.chk_auto_cam.isChecked()
         self.cfg.opencv_detect = self.chk_detect.isChecked()
@@ -1545,6 +1622,11 @@ class MainWindow(QMainWindow):
         self.chk_auto_cam.setChecked(bool(self.cfg.auto_camera_from_radar))
         self.chk_detect.setChecked(bool(self.cfg.opencv_detect))
 
+        if hasattr(self, "s_baud"):
+            idx = self.s_baud.findData(int(self.cfg.baud))
+            if idx >= 0:
+                self.s_baud.setCurrentIndex(idx)
+
         self.s_on.setValue(float(self.cfg.on_threshold_cm))
         self.s_off.setValue(float(self.cfg.off_threshold_cm))
         self.s_trigger.setValue(float(self.cfg.trigger_confirm_sec))
@@ -1567,6 +1649,9 @@ class MainWindow(QMainWindow):
         self._set_connection_pill(self.ser is not None)
 
     def apply_settings(self):
+        if hasattr(self, "s_baud"):
+            self.cfg.baud = int(self.s_baud.currentData())
+
         self.cfg.on_threshold_cm = float(self.s_on.value())
         self.cfg.off_threshold_cm = float(self.s_off.value())
         self.cfg.trigger_confirm_sec = float(self.s_trigger.value())
