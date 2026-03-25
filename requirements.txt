@@ -1,0 +1,11 @@
+PyQt6==6.10.2
+opencv-python==4.13.0.92
+ultralytics==8.4.27
+pyserial==3.5
+numpy==2.4.3
+Pillow==12.1.1
+torch==2.11.0
+torchvision==0.26.0
+matplotlib==3.10.8
+scipy==1.17.1
+polars==1.39.3
