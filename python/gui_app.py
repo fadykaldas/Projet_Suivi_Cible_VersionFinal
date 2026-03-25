@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QComboBox,
     QVBoxLayout, QHBoxLayout, QFrame, QMessageBox, QStackedWidget,
     QCheckBox, QSlider, QSpinBox, QDoubleSpinBox, QFileDialog,
+    QLineEdit, QCompleter,
     QGridLayout
 )
 
@@ -59,6 +60,7 @@ class AppConfig:
     opencv_detect: bool = True
 
     target_object: str = "cell phone"
+    object_confidence: float = 0.25
 
     def save(self, path: Path = CONFIG_PATH):
         path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
@@ -401,6 +403,9 @@ class MainWindow(QMainWindow):
 
         self.detector_frame_count = 0
         self.target_start = None
+        self.object_detection_running = False
+        self.object_detection_cap = None
+        self.object_detection_timer = None
 
         # Keep latest inference boxes for a short time to avoid flicker when running detection every N frames
         self.last_det_boxes = []  # list of (x1,y1,x2,y2,label,is_target)
@@ -432,6 +437,7 @@ class MainWindow(QMainWindow):
         self.page_live = self._build_live_page()
         self.page_face_tracking = self._build_face_tracking_page()
         self.page_measure = self._build_measure_page()
+        self.page_object_detection = self._build_object_detection_page()
         self.page_settings = self._build_settings_page()
         self.page_about = self._build_about_page()
 
@@ -439,8 +445,9 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.page_live)           # 1
         self.pages.addWidget(self.page_face_tracking)  # 2
         self.pages.addWidget(self.page_measure)        # 3
-        self.pages.addWidget(self.page_settings)       # 4
-        self.pages.addWidget(self.page_about)          # 5
+        self.pages.addWidget(self.page_object_detection)  # 4
+        self.pages.addWidget(self.page_settings)       # 5
+        self.pages.addWidget(self.page_about)          # 6
 
         main_layout.addWidget(self.pages, 1)
         root_layout.addWidget(main, 1)
@@ -549,6 +556,7 @@ class MainWindow(QMainWindow):
         self.btn_live = self._nav_button("  📡  Live", self.goto_live)
         self.btn_face_tracking = self._nav_button("  🎯  Face Tracking", self.goto_face_tracking)
         self.btn_measure = self._nav_button("  📏  Mesure d'objet", self.goto_measure)
+        self.btn_object_detection = self._nav_button("  🔎  Object Detection", self.goto_object_detection)
         self.btn_settings = self._nav_button("  ⚙️  Settings", self.goto_settings)
         self.btn_about = self._nav_button("  ℹ️  About", self.goto_about)
 
@@ -556,6 +564,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.btn_live)
         lay.addWidget(self.btn_face_tracking)
         lay.addWidget(self.btn_measure)
+        lay.addWidget(self.btn_object_detection)
         lay.addWidget(self.btn_settings)
         lay.addWidget(self.btn_about)
         lay.addStretch()
@@ -567,7 +576,7 @@ class MainWindow(QMainWindow):
         return sidebar
 
     def _set_nav_checked(self, which: str):
-        for b in [self.btn_home, self.btn_live, self.btn_face_tracking, self.btn_measure, self.btn_settings, self.btn_about]:
+        for b in [self.btn_home, self.btn_live, self.btn_face_tracking, self.btn_measure, self.btn_object_detection, self.btn_settings, self.btn_about]:
             b.setChecked(False)
         getattr(self, which).setChecked(True)
 
@@ -596,6 +605,170 @@ class MainWindow(QMainWindow):
         self.lbl_title.setText("Mesure d'objet")
         self.lbl_sub.setText("Mesure avancée : calibration, contours, surface")
         self._set_nav_checked("btn_measure")
+
+    def _build_object_detection_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+
+        top = QFrame()
+        top.setObjectName("Card")
+        top_lay = QHBoxLayout(top)
+        top_lay.setContentsMargins(16, 16, 16, 16)
+        top_lay.setSpacing(12)
+
+        self.object_search = QLineEdit()
+        self.object_search.setPlaceholderText("Enter any object name, e.g. cell phone, bottle, person")
+        self.object_search.setText(self.target_object)
+        self.object_search.returnPressed.connect(self.apply_object_detection_target)
+        self.object_search_completer = QCompleter(self._get_object_list(), self)
+        self.object_search_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.object_search_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.object_search_completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self.object_search.setCompleter(self.object_search_completer)
+
+        self.object_confidence_spin = QDoubleSpinBox()
+        self.object_confidence_spin.setRange(0.01, 1.0)
+        self.object_confidence_spin.setSingleStep(0.05)
+        self.object_confidence_spin.setDecimals(2)
+        self.object_confidence_spin.setValue(self.cfg.object_confidence)
+        self.object_confidence_spin.setSuffix(" conf")
+
+        self.btn_object_apply = QPushButton("Apply")
+        self.btn_object_apply.setObjectName("SecondaryBtn")
+        self.btn_object_apply.clicked.connect(self.apply_object_detection_target)
+
+        self.btn_object_start = QPushButton("Start Object Detection")
+        self.btn_object_start.clicked.connect(self.toggle_object_detection)
+
+        top_lay.addWidget(QLabel("Search object:"))
+        top_lay.addWidget(self.object_search, 1)
+        top_lay.addWidget(QLabel("Confidence:"))
+        top_lay.addWidget(self.object_confidence_spin)
+        top_lay.addWidget(self.btn_object_apply)
+        top_lay.addWidget(self.btn_object_start)
+
+        self.object_detection_label = QLabel("Object detection stopped")
+        self.object_detection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.object_detection_label.setStyleSheet("background:#0b1220; border-radius:14px; color:#e5e7eb;")
+        self.object_detection_label.setMinimumSize(520, 380)
+        self.object_detection_label.setScaledContents(True)
+
+        self.object_detection_status = QLabel(f"Watching for: {self.target_object}")
+        self.object_detection_status.setStyleSheet("color:#94a3b8;")
+
+        lay.addWidget(top)
+        lay.addWidget(card("Object Detection", self.object_detection_label), 1)
+        lay.addWidget(self.object_detection_status)
+        return page
+
+    def goto_object_detection(self):
+        self.pages.setCurrentIndex(4)
+        self.lbl_title.setText("Object Detection")
+        self.lbl_sub.setText("YOLO object detection with custom search and Arduino buzzer")
+        self._set_nav_checked("btn_object_detection")
+
+    def apply_object_detection_target(self):
+        target = self.object_search.text().strip().lower()
+        if not target:
+            target = "cell phone"
+            self.object_search.setText(target)
+        confidence = float(self.object_confidence_spin.value())
+        self.target_object = target
+        self.cfg.target_object = target
+        self.cfg.object_confidence = confidence
+        self.object_detection_status.setText(f"Watching for: {self.target_object} | confidence >= {confidence:.2f}")
+        self.statusBar().showMessage(f"Target object set to: {self.target_object} | confidence: {confidence:.2f}")
+
+    def toggle_object_detection(self):
+        if self.object_detection_running:
+            self.stop_object_detection()
+        else:
+            self.start_object_detection()
+
+    def start_object_detection(self):
+        self.apply_object_detection_target()
+        if self.yolo is None:
+            self.object_detection_label.setText("YOLO model unavailable")
+            self.statusBar().showMessage("Unable to start object detection: YOLO model unavailable")
+            return
+
+        self.object_detection_cap = cv2.VideoCapture(self.cfg.cam_index)
+        if not self.object_detection_cap.isOpened():
+            self.object_detection_label.setText("Camera not found")
+            self.statusBar().showMessage("Unable to start object detection: camera not found")
+            return
+
+        self.object_detection_running = True
+        self.btn_object_start.setText("Stop Object Detection")
+        self.last_buzz_time = 0.0
+        self.object_detection_timer = QTimer()
+        self.object_detection_timer.timeout.connect(self.object_detection_tick)
+        self.object_detection_timer.start(30)
+        self.object_detection_status.setText(
+            f"Watching for: {self.target_object} | confidence >= {self.cfg.object_confidence:.2f}"
+        )
+
+    def stop_object_detection(self):
+        self.object_detection_running = False
+        self.btn_object_start.setText("Start Object Detection")
+        if self.object_detection_timer is not None:
+            self.object_detection_timer.stop()
+            self.object_detection_timer = None
+        if self.object_detection_cap is not None:
+            self.object_detection_cap.release()
+            self.object_detection_cap = None
+        self.object_detection_label.setText("Object detection stopped")
+        self.object_detection_status.setText(
+            f"Watching for: {self.target_object} | confidence >= {self.cfg.object_confidence:.2f}"
+        )
+
+    def object_detection_tick(self):
+        if self.object_detection_cap is None or not self.object_detection_cap.isOpened():
+            self.stop_object_detection()
+            return
+
+        ret, frame = self.object_detection_cap.read()
+        if not ret:
+            self.object_detection_label.setText("No frame")
+            return
+
+        results = self.yolo(frame, verbose=False, conf=self.cfg.object_confidence)
+        detections = results[0]
+        detected = False
+
+        for box in detections.boxes:
+            class_id = int(box.cls[0])
+            label = str(self.yolo.names[class_id]).lower()
+            if label == self.target_object:
+                detected = True
+                break
+
+        now = time.time()
+        if detected and (now - self.last_buzz_time) > self.buzzer_cooldown:
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.write(b'1')
+                except Exception:
+                    pass
+            self.last_buzz_time = now
+
+        annotated_frame = detections.plot()
+        if detected:
+            status = f"DETECTED: {self.target_object} | confidence >= {self.cfg.object_confidence:.2f}"
+        else:
+            status = f"Watching for: {self.target_object} | confidence >= {self.cfg.object_confidence:.2f}"
+        color = (0, 255, 0) if detected else (0, 0, 255)
+        cv2.putText(annotated_frame, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        bytes_per_line = ch * w
+        qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+        pix = QPixmap.fromImage(qimg)
+        self.object_detection_label.setPixmap(pix)
+        self.object_detection_status.setText(status)
 
     def toggle_measure_camera(self):
         if not hasattr(self, 'measure_running'):
