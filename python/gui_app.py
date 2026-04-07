@@ -12,12 +12,12 @@ from collections import deque
 import cv2
 try:
     from ultralytics import YOLO
-except ImportError:
+except Exception:
     YOLO = None
 import serial
 import serial.tools.list_ports
 
-from PyQt6.QtCore import Qt, QTimer, QPointF
+from PyQt6.QtCore import Qt, QTimer, QPointF, QThread, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap, QPainter, QPen, QColor, QFont, QAction
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QComboBox,
@@ -47,7 +47,7 @@ class AppConfig:
     hold_seconds: float = 2.0
     detect_every_n_frames: int = 2
 
-    radar_max_range_cm: float = 200.0
+    radar_max_range_cm: float = 40.0
     point_ttl_sec: float = 2.0
     sweep_trail: int = 18
 
@@ -299,49 +299,148 @@ class RadarWidget(QWidget):
 
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor(11, 15, 23))
+        p.fillRect(self.rect(), QColor(18, 20, 25))
 
         w, h = self.width(), self.height()
-        cx, cy = w * 0.5, h * 0.93
-        radius = min(w * 0.48, h * 0.85)
+        margin = 14
+        baseline_y = h - 28
+        cx, cy = w * 0.5, baseline_y
+        radius = min((w * 0.5) - margin, (h * 0.86))
 
-        grid = QColor(34, 197, 94, 90)
-        sweep = QColor(34, 197, 94, 220)
+        grid_neon = QColor(71, 255, 63, 210)
+        grid_soft = QColor(71, 255, 63, 110)
 
-        p.setPen(QPen(grid, 2))
-        for frac in [0.25, 0.5, 0.75, 1.0]:
+        # Bottom baseline like the Processing radar UI.
+        p.setPen(QPen(grid_neon, 2))
+        p.drawLine(margin, int(cy), w - margin, int(cy))
+
+        # Range arcs.
+        p.setPen(QPen(grid_neon, 2))
+        ring_fracs = [0.25, 0.50, 0.75, 1.0]
+        for frac in ring_fracs:
             r = radius * frac
-            p.drawArc(int(cx - r), int(cy - r), int(2 * r), int(2 * r), 0 * 16, 180 * 16)
+            p.drawArc(int(cx - r), int(cy - r), int(2 * r), int(2 * r), 0, 180 * 16)
 
+        # Radial grid at 30-degree steps, labels excluding 0 and 180 for a cleaner look.
+        p.setPen(QPen(grid_soft, 2))
+        p.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
         for ang in [0, 30, 60, 90, 120, 150, 180]:
             rad = math.radians(180 - ang)
             x = cx + radius * math.cos(rad)
             y = cy - radius * math.sin(rad)
             p.drawLine(int(cx), int(cy), int(x), int(y))
 
-        p.setPen(QPen(QColor(226, 232, 240)))
-        p.setFont(QFont("Consolas", 10))
-        dist_txt = f"{self.last_distance:.0f} cm" if self.last_distance is not None else "N/A"
-        p.drawText(12, 22, f"Angle: {self.last_angle:.0f}°   Dist: {dist_txt}")
+            if ang in (30, 60, 90, 120, 150):
+                lx = cx + (radius + 18) * math.cos(rad)
+                ly = cy - (radius + 18) * math.sin(rad)
+                p.setPen(QPen(grid_neon, 2))
+                p.drawText(int(lx - 18), int(ly + 6), f"{ang}°")
+                p.setPen(QPen(grid_soft, 2))
 
+        # Green sweep fan trail (newest first).
         for i, ang in enumerate(self.sweep_angles):
-            alpha = max(20, 230 - i * 12)
-            p.setPen(QPen(QColor(sweep.red(), sweep.green(), sweep.blue(), alpha), 4 if i == 0 else 2))
+            alpha = max(8, 220 - i * 14)
+            width = 8 if i == 0 else 6
             rad = math.radians(180 - ang)
             x = cx + radius * math.cos(rad)
             y = cy - radius * math.sin(rad)
+            p.setPen(QPen(QColor(38, 255, 72, alpha), width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             p.drawLine(QPointF(cx, cy), QPointF(x, y))
 
+        # Echoes as red radial hits (like Processing red spikes).
         for (ang, dist, ts) in self.points:
             age = now - ts
-            fade = max(40, int(255 * (1.0 - age / self.cfg.point_ttl_sec)))
-            p.setPen(QPen(QColor(239, 68, 68, fade), 6))
+            ttl = max(0.001, self.cfg.point_ttl_sec)
+            life = max(0.0, 1.0 - (age / ttl))
+            alpha = int(40 + 180 * life)
+            thickness = 3.0 + 3.0 * life
 
             r = (dist / self.cfg.radar_max_range_cm) * radius
+            r = max(0.0, min(radius, r))
             rad = math.radians(180 - ang)
             x = cx + r * math.cos(rad)
             y = cy - r * math.sin(rad)
-            p.drawPoint(int(x), int(y))
+
+            p.setPen(QPen(QColor(170, 0, 0, alpha), thickness, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(QPointF(cx, cy), QPointF(x, y))
+
+        # Text labels at the bottom, matching the screenshot style.
+        p.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
+        p.setPen(QPen(grid_neon, 1))
+
+        p.drawText(margin + 6, h - 6, "Projet Suivi Cibles")
+        p.drawText(int(cx + 16), h - 6, f"Angle: {self.last_angle:.0f}°")
+
+        if self.last_distance is None:
+            dist_txt = "Distance: N/A"
+        else:
+            dist_txt = f"Distance: {self.last_distance:.0f}cm"
+        p.drawText(int(w * 0.73), h - 6, dist_txt)
+
+        # Bottom range markers (10cm, 20cm, ... scaled to configured max range).
+        p.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        max_range = max(1.0, float(self.cfg.radar_max_range_cm))
+        for frac in ring_fracs:
+            r = radius * frac
+            value = int(round(max_range * frac))
+            label = f"{value}cm"
+            p.drawText(int(cx + r - 18), int(cy - 6), label)
+
+
+class CameraCaptureThread(QThread):
+    frame_ready = pyqtSignal(object)
+    camera_error = pyqtSignal(str)
+
+    def __init__(self, cam_index: int):
+        super().__init__()
+        self.cam_index = int(cam_index)
+        self._running = True
+
+    def stop(self):
+        self._running = False
+
+    def _open_camera(self):
+        for backend in (cv2.CAP_DSHOW, cv2.CAP_MSMF, None):
+            try:
+                if backend is None:
+                    cam = cv2.VideoCapture(self.cam_index)
+                else:
+                    cam = cv2.VideoCapture(self.cam_index, backend)
+                if cam is not None and cam.isOpened():
+                    try:
+                        cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    except Exception:
+                        pass
+                    return cam
+                if cam is not None:
+                    cam.release()
+            except Exception:
+                try:
+                    if cam is not None:
+                        cam.release()
+                except Exception:
+                    pass
+        return None
+
+    def run(self):
+        cam = self._open_camera()
+        if cam is None or not cam.isOpened():
+            self.camera_error.emit(f"Camera not accessible (index {self.cam_index}).")
+            return
+
+        try:
+            while self._running:
+                ret, frame = cam.read()
+                if ret and frame is not None:
+                    self.frame_ready.emit(frame)
+                self.msleep(12)
+        except Exception as e:
+            self.camera_error.emit(f"Camera capture error: {e}")
+        finally:
+            try:
+                cam.release()
+            except Exception:
+                pass
 
 
 # -------------------- UI BLOCKS --------------------
@@ -378,12 +477,19 @@ class MainWindow(QMainWindow):
         self.last_angle_raw = None
         self.last_distance = None
         self.dist_history = deque(maxlen=5)
+        self.serial_buffer = ""
+        self.last_real_angle_ts = 0.0
+        self.synthetic_angle_raw = 90.0
+        self.synthetic_dir = 1.0
+        self.last_synth_update_ts = time.time()
 
         self.state = "idle"
         self.detect_start = None
         self.loss_start = None
 
         self.cam = None
+        self.camera_thread = None
+        self.latest_frame = None
         self.last_frame_bgr = None  # <- for saving camera snapshot
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
@@ -1313,6 +1419,11 @@ class MainWindow(QMainWindow):
         self.last_angle_raw = None
         self.last_distance = None
         self.dist_history.clear()
+        self.serial_buffer = ""
+        self.last_real_angle_ts = 0.0
+        self.synthetic_angle_raw = 90.0
+        self.synthetic_dir = 1.0
+        self.last_synth_update_ts = time.time()
         self.state = "idle"
         self.detect_start = None
         self.loss_start = None
@@ -1324,12 +1435,50 @@ class MainWindow(QMainWindow):
         else:
             self.close_camera()
 
+    def _stop_other_camera_modes(self):
+        """Ensure only one OpenCV capture is active to avoid backend conflicts."""
+        try:
+            if getattr(self, "object_detection_running", False):
+                self.stop_object_detection()
+        except Exception:
+            pass
+
+    def _on_camera_error(self, message: str):
+        self.statusBar().showMessage(message)
+        try:
+            QMessageBox.warning(self, "Camera", message)
+        except Exception:
+            pass
+        self.close_camera()
+
+    def _on_camera_frame(self, frame):
+        # Keep only the latest frame to avoid queue buildup and UI lag.
+        self.latest_frame = frame
+        try:
+            if getattr(self, "measure_running", False):
+                self.stop_measure_camera()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "face_tracking_running", False):
+                self.stop_face_tracking_camera()
+        except Exception:
+            pass
+
     def open_camera(self):
-        cam = cv2.VideoCapture(int(self.cfg.cam_index))
-        if not cam.isOpened():
-            QMessageBox.critical(self, "Camera", f"Camera not accessible (index {self.cfg.cam_index}).")
+        self._stop_other_camera_modes()
+
+        if self.camera_thread is not None and self.camera_thread.isRunning():
             return
-        self.cam = cam
+
+        self.latest_frame = None
+        self.camera_thread = CameraCaptureThread(int(self.cfg.cam_index))
+        self.camera_thread.frame_ready.connect(self._on_camera_frame)
+        self.camera_thread.camera_error.connect(self._on_camera_error)
+        self.camera_thread.start()
+
+        # Keep a non-None sentinel for existing logic paths that check self.cam.
+        self.cam = True
         self.btn_camera.setText("Stop camera")
         self.target_start = None
         self.last_det_boxes = []
@@ -1340,12 +1489,21 @@ class MainWindow(QMainWindow):
 
 
     def close_camera(self):
+        if self.camera_thread is not None:
+            try:
+                self.camera_thread.stop()
+                self.camera_thread.wait(1000)
+            except Exception:
+                pass
+            self.camera_thread = None
+
         try:
             if self.cam:
-                self.cam.release()
+                pass
         except Exception:
             pass
         self.cam = None
+        self.latest_frame = None
         self.btn_camera.setText("Start camera")
         self.cam_label.setText("Camera stopped")
         self.target_start = None
@@ -1506,116 +1664,89 @@ class MainWindow(QMainWindow):
         if self.cam is None:
             return
 
-        ret, frame = self.cam.read()
-        if not ret:
-            return
+        try:
+            if self.latest_frame is None:
+                return
+            frame = self.latest_frame
+            self.latest_frame = None
 
-        now = time.time()
-        detected_obj = False
-        elapsed = 0.0
+            now = time.time()
+            detected_obj = False
+            elapsed = 0.0
 
-        if self.cfg.opencv_detect and self.chk_detect.isChecked():
-            self.detector_frame_count += 1
-            if self.detector_frame_count % max(1, int(self.cfg.detect_every_n_frames)) == 0:
-                # Use YOLOv8 to detect objects (e.g. "cell phone")
-                if self.yolo is not None:
-                    results = self.yolo(frame, verbose=False, conf=self.cfg.object_confidence)
-                    detections = results[0]
-
-                    # Store detected boxes so we can keep them on-screen for a short time
+            if self.cfg.opencv_detect and self.chk_detect.isChecked():
+                self.detector_frame_count += 1
+                if self.detector_frame_count % max(1, int(self.cfg.detect_every_n_frames)) == 0:
+                    # Live page uses lightweight face detection only to keep UI responsive.
                     self.last_det_boxes = []
-                    for box in detections.boxes:
-                        class_id = int(box.cls[0])
-                        label = self.yolo.names.get(class_id, str(class_id))
-                        is_target = (label == self.target_object)
-                        if is_target:
-                            detected_obj = True
-                        try:
-                            xyxy = box.xyxy[0].cpu().numpy().astype(int)
-                        except Exception:
-                            xyxy = box.xyxy[0].astype(int)
-                        x1, y1, x2, y2 = int(xyxy[0]), int(xyxy[1]), int(xyxy[2]), int(xyxy[3])
+                    if not self.face_cascade.empty():
+                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=4)
+                        detected_obj = (len(faces) > 0)
 
-                        self.last_det_boxes.append((x1, y1, x2, y2, label, is_target))
+                        for (x, y, w, h) in faces:
+                            x1, y1, x2, y2 = x, y, x + w, y + h
+                            self.last_det_boxes.append((x1, y1, x2, y2, "face", True))
 
-                    self.last_det_ts = now
+                        self.last_det_ts = now
 
-                    if detected_obj:
-                        if self.target_start is None:
-                            self.target_start = now
-                        elapsed = now - self.target_start
-                    else:
-                        self.target_start = None
-                        elapsed = 0.0
+                        if detected_obj:
+                            if self.target_start is None:
+                                self.target_start = now
+                            elapsed = now - self.target_start
+                        else:
+                            self.target_start = None
+                            elapsed = 0.0
 
-        # If we haven't run detection this frame, still draw the last boxes briefly to avoid flicker.
-        if self.last_det_boxes and (now - self.last_det_ts) <= self.det_box_ttl:
-            for (x1, y1, x2, y2, label, is_target) in self.last_det_boxes:
-                color = (34, 197, 94) if is_target else (150, 150, 150)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+            # Keep recent boxes briefly to avoid flicker.
+            if self.last_det_boxes and (now - self.last_det_ts) <= self.det_box_ttl:
+                for (x1, y1, x2, y2, label, is_target) in self.last_det_boxes:
+                    color = (34, 197, 94) if is_target else (150, 150, 150)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-        # Fallback to Haar cascade if YOLO is not available
-        elif not self.face_cascade.empty():
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=4)
-            detected_obj = (len(faces) > 0)
+            # Predictive trajectory
+            if self.cfg.trajectory_enabled:
+                target_center = self._get_target_center_from_boxes()
+                self._update_trajectory(target_center, now)
+                self._draw_trajectory_overlay(frame)
 
-            self.last_det_boxes = []
-            for (x, y, w, h) in faces:
-                x1, y1, x2, y2 = x, y, x + w, y + h
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (34, 197, 94), 2)
-                self.last_det_boxes.append((x1, y1, x2, y2, "face", True))
-            if detected_obj:
-                self.last_det_ts = now
+            dist_text = f"Dist: {self.last_distance:.1f} cm" if self.last_distance is not None else "Dist: N/A"
+            cv2.putText(frame, dist_text, (16, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (226, 232, 240), 2)
 
-            if detected_obj:
-                if self.target_start is None:
-                    self.target_start = now
-                elapsed = now - self.target_start
+            status = f"DETECTED: {self.target_object}" if detected_obj else f"Watching for: {self.target_object}"
+            color = (0, 255, 0) if detected_obj else (0, 0, 255)
+            cv2.putText(frame, status, (16, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+            # Send buzzer signal via serial (same logic as webcam_detect.py)
+            if detected_obj and (now - self.last_buzz_time) > self.buzzer_cooldown:
+                if self.ser is not None and getattr(self.ser, "is_open", True):
+                    try:
+                        self.ser.write(b"1")
+                    except Exception:
+                        pass
+                self.last_buzz_time = now
+
+            if detected_obj and elapsed >= self.cfg.hold_seconds:
+                cv2.putText(frame, "CIBLE DETECTEE", (16, 110), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (239, 68, 68), 3)
             else:
-                self.target_start = None
-                elapsed = 0.0
+                cv2.putText(
+                    frame,
+                    f"Hold: {elapsed:.1f}s/{self.cfg.hold_seconds:.1f}s",
+                    (16, 110),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (226, 232, 240),
+                    2
+                )
 
-        # Predictive trajectory
-        if self.cfg.trajectory_enabled:
-            target_center = self._get_target_center_from_boxes()
-            self._update_trajectory(target_center, now)
-            self._draw_trajectory_overlay(frame)
+            # store the last frame for saving
+            self.last_frame_bgr = frame.copy()
+            self.cam_label.setPixmap(frame_to_pixmap(frame))
 
-        dist_text = f"Dist: {self.last_distance:.1f} cm" if self.last_distance is not None else "Dist: N/A"
-        cv2.putText(frame, dist_text, (16, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (226, 232, 240), 2)
-
-        status = f"DETECTED: {self.target_object}" if detected_obj else f"Watching for: {self.target_object}"
-        color = (0, 255, 0) if detected_obj else (0, 0, 255)
-        cv2.putText(frame, status, (16, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-
-        # Send buzzer signal via serial (same logic as webcam_detect.py)
-        if detected_obj and (now - self.last_buzz_time) > self.buzzer_cooldown:
-            if self.ser is not None and getattr(self.ser, "is_open", True):
-                try:
-                    self.ser.write(b"1")
-                except Exception:
-                    pass
-            self.last_buzz_time = now
-
-        if detected_obj and elapsed >= self.cfg.hold_seconds:
-            cv2.putText(frame, "CIBLE DETECTEE", (16, 110), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (239, 68, 68), 3)
-        else:
-            cv2.putText(
-                frame,
-                f"Hold: {elapsed:.1f}s/{self.cfg.hold_seconds:.1f}s",
-                (16, 110),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (226, 232, 240),
-                2
-            )
-
-        # store the last frame for saving
-        self.last_frame_bgr = frame.copy()
-
-        self.cam_label.setPixmap(frame_to_pixmap(frame))
+        except Exception as e:
+            self.statusBar().showMessage(f"Camera pipeline error: {e}")
+            self.close_camera()
 
     def serial_tick(self):
         if self.ser is None:
@@ -1624,21 +1755,77 @@ class MainWindow(QMainWindow):
         try:
             if getattr(self.ser, "in_waiting", 0) <= 0:
                 return
-            line = self.ser.readline().decode(errors="replace").strip()
+            raw = self.ser.read(self.ser.in_waiting).decode(errors="replace")
         except Exception:
             return
 
-        a, d = self.parser.feed(line)
+        self.serial_buffer += raw
+        if len(self.serial_buffer) > 4096:
+            self.serial_buffer = self.serial_buffer[-4096:]
 
-        if a is not None:
-            self.last_angle_raw = a
+        got_angle = False
+        got_distance = False
 
-        if d is not None:
-            self.dist_history.append(d)
-            valid = [x for x in self.dist_history if x is not None]
-            smooth = statistics.median(valid) if valid else None
-            if smooth is not None:
-                self.last_distance = smooth
+        def handle_packet(packet_text: str):
+            nonlocal got_angle, got_distance
+            packet_text = packet_text.strip()
+            if not packet_text:
+                return
+
+            # Distance-only stream (e.g. "23.5") from simple Arduino sketches.
+            if re.fullmatch(r"-?\d+(?:\.\d+)?", packet_text):
+                a, d = None, float(packet_text)
+            else:
+                a, d = self.parser.feed(packet_text)
+
+            if a is not None:
+                self.last_angle_raw = a
+                self.last_real_angle_ts = time.time()
+                got_angle = True
+            if d is not None:
+                if d > 0:
+                    self.dist_history.append(d)
+                valid = [x for x in self.dist_history if x is not None and x > 0]
+                smooth = statistics.median(valid) if valid else None
+                if smooth is not None:
+                    self.last_distance = smooth
+                    got_distance = True
+
+        # 1) Newline protocol (safe with decimal distances like 23.5).
+        self.serial_buffer = self.serial_buffer.replace("\r", "\n")
+        while "\n" in self.serial_buffer:
+            line, self.serial_buffer = self.serial_buffer.split("\n", 1)
+            handle_packet(line)
+
+        # 2) Processing-style protocol: "angle,distance." without newline.
+        pkt_re = re.compile(r"(\d{1,3}\s*,\s*-?\d+(?:\.\d+)?)\.")
+        while True:
+            m = pkt_re.search(self.serial_buffer)
+            if not m:
+                break
+            handle_packet(m.group(1))
+            self.serial_buffer = self.serial_buffer[m.end():]
+
+        # If serial stream has no angle, animate a 0..180..0 sweep like Processing.
+        now = time.time()
+        if (not got_angle) and ((now - self.last_real_angle_ts) > 0.35):
+            dt = max(0.0, now - self.last_synth_update_ts)
+            self.last_synth_update_ts = now
+            sweep_speed_deg_per_sec = 25.0
+            self.synthetic_angle_raw += self.synthetic_dir * sweep_speed_deg_per_sec * dt
+
+            if self.synthetic_angle_raw >= 180.0:
+                self.synthetic_angle_raw = 180.0
+                self.synthetic_dir = -1.0
+            elif self.synthetic_angle_raw <= 0.0:
+                self.synthetic_angle_raw = 0.0
+                self.synthetic_dir = 1.0
+
+            self.last_angle_raw = self.synthetic_angle_raw
+
+        # Even without new distance values, keep redrawing to show sweep motion.
+        if not got_distance and self.last_distance is None:
+            self.last_distance = None
 
         self.radar_widget.update_config(self.cfg)
         self.radar_widget.update_data(self.last_angle_raw, self.last_distance)
