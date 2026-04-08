@@ -554,6 +554,7 @@ class MainWindow(QMainWindow):
         self.page_live = self._build_live_page()
         self.page_face_tracking = self._build_face_tracking_page()
         self.page_measure = self._build_measure_page()
+        self.page_image_3d = self._build_image_3d_page()
         self.page_object_detection = self._build_object_detection_page()
         self.page_settings = self._build_settings_page()
         self.page_about = self._build_about_page()
@@ -562,9 +563,10 @@ class MainWindow(QMainWindow):
         self.pages.addWidget(self.page_live)           # 1
         self.pages.addWidget(self.page_face_tracking)  # 2
         self.pages.addWidget(self.page_measure)        # 3
-        self.pages.addWidget(self.page_object_detection)  # 4
-        self.pages.addWidget(self.page_settings)       # 5
-        self.pages.addWidget(self.page_about)          # 6
+        self.pages.addWidget(self.page_image_3d)       # 4
+        self.pages.addWidget(self.page_object_detection)  # 5
+        self.pages.addWidget(self.page_settings)       # 6
+        self.pages.addWidget(self.page_about)          # 7
 
         main_layout.addWidget(self.pages, 1)
         root_layout.addWidget(main, 1)
@@ -715,6 +717,28 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(card("Mesure d'objet (CamRuler)", self.measure_label), 1)
         lay.addWidget(self.btn_measure_start)
+        return page
+
+    def _build_image_3d_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(12)
+
+        info = QLabel(
+            "Image 3D tab added. Navigation and OpenCV integration are wired in later commits."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#94a3b8;")
+
+        self.image3d_label = QLabel("Image 3D page ready")
+        self.image3d_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image3d_label.setStyleSheet("background:#0b1220; border-radius:14px; color:#e5e7eb;")
+        self.image3d_label.setMinimumSize(640, 420)
+        self.image3d_label.setScaledContents(True)
+
+        lay.addWidget(card("Image 3D", self.image3d_label), 1)
+        lay.addWidget(info)
         return page
 
     def goto_measure(self):
