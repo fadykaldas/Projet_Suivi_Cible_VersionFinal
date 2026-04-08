@@ -27,6 +27,8 @@ from PyQt6.QtWidgets import (
     QGridLayout
 )
 
+from image_3d import Image3DConfig, SingleCameraChessboardMeasurer
+
 # -------------------- CONFIG / PERSISTENCE --------------------
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "app_config.json"
@@ -67,6 +69,14 @@ class AppConfig:
     trajectory_prediction_steps: int = 6
     trajectory_step_sec: float = 0.20
     trajectory_min_dt: float = 0.001
+
+    image3d_chessboard_cols: int = 9
+    image3d_chessboard_rows: int = 6
+    image3d_square_size_mm: float = 25.0
+    image3d_min_calibration_frames: int = 12
+    image3d_blur_kernel_size: int = 5
+    image3d_min_contour_area: int = 2000
+    image3d_debug: bool = False
 
     def save(self, path: Path = CONFIG_PATH):
         path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
@@ -519,6 +529,15 @@ class MainWindow(QMainWindow):
         self.object_detection_cap = None
         self.object_detection_timer = None
 
+        self.image3d_running = False
+        self.image3d_cap = None
+        self.image3d_timer = None
+        self.image3d_debug_images = {}
+        self.image3d_backend = SingleCameraChessboardMeasurer(
+            self._build_image3d_config(),
+            APP_DIR / "calibration_data.npz",
+        )
+
         # Keep latest inference boxes for a short time to avoid flicker when running detection every N frames
         self.last_det_boxes = []  # list of (x1,y1,x2,y2,label,is_target)
         self.last_det_ts = 0.0
@@ -702,6 +721,26 @@ class MainWindow(QMainWindow):
             b.setChecked(False)
         getattr(self, which).setChecked(True)
 
+    def _build_image3d_config(self) -> Image3DConfig:
+        """Create the backend config from the persisted application config."""
+        return Image3DConfig(
+            chessboard_cols=int(self.cfg.image3d_chessboard_cols),
+            chessboard_rows=int(self.cfg.image3d_chessboard_rows),
+            square_size_mm=float(self.cfg.image3d_square_size_mm),
+            min_calibration_frames=int(self.cfg.image3d_min_calibration_frames),
+            blur_kernel_size=int(self.cfg.image3d_blur_kernel_size),
+            min_contour_area=int(self.cfg.image3d_min_contour_area),
+        )
+
+    def _refresh_image3d_backend(self, reload_saved: bool = True):
+        """Rebuild the Image 3D backend after settings changes."""
+        self.image3d_backend = SingleCameraChessboardMeasurer(
+            self._build_image3d_config(),
+            APP_DIR / "calibration_data.npz",
+        )
+        if not reload_saved:
+            self.image3d_backend.reset_calibration_samples()
+
     def _build_measure_page(self) -> QWidget:
         page = QWidget()
         lay = QVBoxLayout(page)
@@ -728,20 +767,94 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
 
-        info = QLabel(
-            "Image 3D tab added. Navigation and OpenCV integration are wired in later commits."
-        )
-        info.setWordWrap(True)
-        info.setStyleSheet("color:#94a3b8;")
+        controls = QFrame()
+        controls.setObjectName("Card")
+        controls_lay = QGridLayout(controls)
+        controls_lay.setContentsMargins(16, 16, 16, 16)
+        controls_lay.setHorizontalSpacing(12)
+        controls_lay.setVerticalSpacing(10)
 
-        self.image3d_label = QLabel("Image 3D page ready")
+        self.image3d_btn_start = QPushButton("Start Image 3D")
+        self.image3d_btn_start.clicked.connect(self.toggle_image3d_camera)
+
+        self.image3d_btn_capture = QPushButton("Capture Chessboard")
+        self.image3d_btn_capture.setObjectName("SecondaryBtn")
+        self.image3d_btn_capture.clicked.connect(self.capture_image3d_sample)
+
+        self.image3d_btn_calibrate = QPushButton("Calibrate Camera")
+        self.image3d_btn_calibrate.setObjectName("SecondaryBtn")
+        self.image3d_btn_calibrate.clicked.connect(self.run_image3d_calibration)
+
+        self.image3d_btn_reset = QPushButton("Reset Samples")
+        self.image3d_btn_reset.setObjectName("SecondaryBtn")
+        self.image3d_btn_reset.clicked.connect(self.reset_image3d_samples)
+
+        self.image3d_btn_delete = QPushButton("Delete Saved Calibration")
+        self.image3d_btn_delete.setObjectName("SecondaryBtn")
+        self.image3d_btn_delete.clicked.connect(self.delete_image3d_calibration)
+
+        self.image3d_chk_debug = QCheckBox("Debug processing")
+        self.image3d_chk_debug.setChecked(bool(self.cfg.image3d_debug))
+
+        self.image3d_status = QLabel("Calibration file: waiting")
+        self.image3d_status.setStyleSheet("color:#94a3b8;")
+
+        self.image3d_results = QLabel(
+            "Width: N/A\nLength: N/A\nHeight: N/A\nRMS: N/A\nSamples: 0"
+        )
+        self.image3d_results.setStyleSheet("color:#cbd5e1;")
+
+        controls_lay.addWidget(self.image3d_btn_start, 0, 0)
+        controls_lay.addWidget(self.image3d_btn_capture, 0, 1)
+        controls_lay.addWidget(self.image3d_btn_calibrate, 0, 2)
+        controls_lay.addWidget(self.image3d_btn_reset, 0, 3)
+        controls_lay.addWidget(self.image3d_btn_delete, 0, 4)
+        controls_lay.addWidget(self.image3d_chk_debug, 1, 0, 1, 2)
+        controls_lay.addWidget(self.image3d_status, 1, 2, 1, 3)
+        controls_lay.addWidget(self.image3d_results, 2, 0, 1, 5)
+
+        views = QHBoxLayout()
+        views.setSpacing(12)
+
+        self.image3d_label = QLabel("Image 3D stopped")
         self.image3d_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image3d_label.setStyleSheet("background:#0b1220; border-radius:14px; color:#e5e7eb;")
         self.image3d_label.setMinimumSize(640, 420)
         self.image3d_label.setScaledContents(True)
 
-        lay.addWidget(card("Image 3D", self.image3d_label), 1)
-        lay.addWidget(info)
+        debug_panel = QWidget()
+        debug_lay = QVBoxLayout(debug_panel)
+        debug_lay.setContentsMargins(0, 0, 0, 0)
+        debug_lay.setSpacing(12)
+
+        self.image3d_debug_threshold = QLabel("Debug threshold")
+        self.image3d_debug_threshold.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image3d_debug_threshold.setStyleSheet("background:#0b1220; border-radius:14px; color:#64748b;")
+        self.image3d_debug_threshold.setMinimumSize(280, 200)
+        self.image3d_debug_threshold.setScaledContents(True)
+
+        self.image3d_debug_combined = QLabel("Debug combined")
+        self.image3d_debug_combined.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image3d_debug_combined.setStyleSheet("background:#0b1220; border-radius:14px; color:#64748b;")
+        self.image3d_debug_combined.setMinimumSize(280, 200)
+        self.image3d_debug_combined.setScaledContents(True)
+
+        debug_lay.addWidget(card("Debug Threshold", self.image3d_debug_threshold), 1)
+        debug_lay.addWidget(card("Debug Combined", self.image3d_debug_combined), 1)
+
+        views.addWidget(card("Image 3D Live", self.image3d_label), 3)
+        views.addWidget(debug_panel, 2)
+
+        help_text = QLabel(
+            "Workflow: start camera, show the chessboard, capture 12+ views, calibrate, then place an object on the board. "
+            "Width and length are measured on the board plane in mm. Height is shown as an estimate only."
+        )
+        help_text.setWordWrap(True)
+        help_text.setStyleSheet("color:#94a3b8;")
+
+        lay.addWidget(controls)
+        lay.addLayout(views, 1)
+        lay.addWidget(help_text)
         return page
 
     def goto_measure(self):
@@ -753,8 +866,144 @@ class MainWindow(QMainWindow):
     def goto_image_3d(self):
         self.pages.setCurrentIndex(4)
         self.lbl_title.setText("Image 3D")
-        self.lbl_sub.setText("Mesure 3D basée sur damier et calibration")
+        self.lbl_sub.setText("Calibration par damier + mesure en mm sur un plan de référence")
         self._set_nav_checked("btn_image_3d")
+
+    def toggle_image3d_camera(self):
+        if self.image3d_running:
+            self.stop_image3d_camera()
+        else:
+            self.start_image3d_camera()
+
+    def start_image3d_camera(self):
+        self._stop_other_camera_modes()
+        try:
+            if getattr(self, "measure_running", False):
+                self.stop_measure_camera()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "face_tracking_running", False):
+                self.stop_face_tracking_camera()
+        except Exception:
+            pass
+
+        self.image3d_cap = cv2.VideoCapture(self.cfg.cam_index)
+        if not self.image3d_cap.isOpened():
+            self.image3d_label.setText("Camera not found")
+            self.image3d_status.setText("Unable to open camera for Image 3D.")
+            return
+
+        self.image3d_running = True
+        self.image3d_btn_start.setText("Stop Image 3D")
+        self.image3d_timer = QTimer()
+        self.image3d_timer.timeout.connect(self.image3d_tick)
+        self.image3d_timer.start(30)
+        self.image3d_status.setText("Camera running. Show the chessboard to calibrate or measure.")
+        self._update_image3d_status_labels()
+
+    def stop_image3d_camera(self):
+        self.image3d_running = False
+        self.image3d_btn_start.setText("Start Image 3D")
+        if self.image3d_timer is not None:
+            self.image3d_timer.stop()
+            self.image3d_timer = None
+        if self.image3d_cap is not None:
+            self.image3d_cap.release()
+            self.image3d_cap = None
+        self.image3d_label.setText("Image 3D stopped")
+        self.image3d_debug_threshold.setText("Debug threshold")
+        self.image3d_debug_combined.setText("Debug combined")
+
+    def capture_image3d_sample(self):
+        if not self.image3d_running or self.image3d_cap is None:
+            self.image3d_status.setText("Start Image 3D first, then capture chessboard samples.")
+            return
+        ret, frame = self.image3d_cap.read()
+        if not ret or frame is None:
+            self.image3d_status.setText("Failed to read a frame for calibration capture.")
+            return
+        success, message = self.image3d_backend.capture_calibration_sample(frame)
+        self.image3d_status.setText(message)
+        self._update_image3d_status_labels()
+        if success:
+            self.statusBar().showMessage(message)
+
+    def run_image3d_calibration(self):
+        success, message = self.image3d_backend.calibrate()
+        self.image3d_status.setText(message)
+        self._update_image3d_status_labels()
+        self.statusBar().showMessage(message)
+
+    def reset_image3d_samples(self):
+        self.image3d_backend.reset_calibration_samples()
+        self.image3d_status.setText("Captured Image 3D calibration samples cleared.")
+        self._update_image3d_status_labels()
+
+    def delete_image3d_calibration(self):
+        self.image3d_backend.delete_saved_calibration()
+        self.image3d_status.setText("Saved Image 3D calibration deleted.")
+        self._update_image3d_status_labels()
+
+    def _pixmap_from_gray(self, image_gray):
+        if image_gray is None:
+            return None
+        if len(image_gray.shape) == 2:
+            rgb = cv2.cvtColor(image_gray, cv2.COLOR_GRAY2RGB)
+        else:
+            rgb = cv2.cvtColor(image_gray, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        bytes_per_line = ch * w
+        qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+        return QPixmap.fromImage(qimg)
+
+    def _update_image3d_status_labels(self):
+        rms_text = f"{self.image3d_backend.rms_error:.4f} px" if self.image3d_backend.rms_error is not None else "N/A"
+        self.image3d_results.setText(
+            "Width: N/A\n"
+            "Length: N/A\n"
+            "Height: N/A\n"
+            f"RMS: {rms_text}\n"
+            f"Samples: {len(self.image3d_backend.image_points)}"
+        )
+
+    def image3d_tick(self):
+        if self.image3d_cap is None or not self.image3d_cap.isOpened():
+            self.stop_image3d_camera()
+            return
+
+        ret, frame = self.image3d_cap.read()
+        if not ret or frame is None:
+            self.image3d_label.setText("No frame")
+            return
+
+        debug_enabled = self.image3d_chk_debug.isChecked()
+        state, debug_images = self.image3d_backend.process_frame(frame, debug=debug_enabled)
+        self.image3d_label.setPixmap(frame_to_pixmap(state.frame_bgr))
+
+        width_text = f"{state.width_mm:.1f} mm" if state.width_mm is not None else "N/A"
+        length_text = f"{state.length_mm:.1f} mm" if state.length_mm is not None else "N/A"
+        height_text = f"~{state.estimated_height_mm:.1f} mm" if state.estimated_height_mm is not None else "N/A"
+        rms_text = f"{state.rms_error:.4f} px" if state.rms_error is not None else "N/A"
+        self.image3d_results.setText(
+            f"Width: {width_text}\n"
+            f"Length: {length_text}\n"
+            f"Height: {height_text}\n"
+            f"RMS: {rms_text}\n"
+            f"Samples: {state.calibration_samples}"
+        )
+        self.image3d_status.setText(state.message)
+
+        if debug_enabled and debug_images:
+            threshold_pix = self._pixmap_from_gray(debug_images.get("threshold"))
+            combined_pix = self._pixmap_from_gray(debug_images.get("combined"))
+            if threshold_pix is not None:
+                self.image3d_debug_threshold.setPixmap(threshold_pix)
+            if combined_pix is not None:
+                self.image3d_debug_combined.setPixmap(combined_pix)
+        else:
+            self.image3d_debug_threshold.setText("Enable debug processing")
+            self.image3d_debug_combined.setText("Enable debug processing")
 
     def _build_object_detection_page(self) -> QWidget:
         page = QWidget()
@@ -1312,6 +1561,30 @@ class MainWindow(QMainWindow):
         og.addWidget(QLabel("Camera index"), 3, 0); og.addWidget(self.s_cam_index, 3, 1)
 
         row2.addWidget(card("OpenCV", ocv), 1)
+
+        image3d = QWidget()
+        ig = QGridLayout(image3d)
+        ig.setContentsMargins(0, 0, 0, 0)
+        ig.setHorizontalSpacing(12)
+        ig.setVerticalSpacing(10)
+
+        self.s_image3d_cols = QSpinBox(); self.s_image3d_cols.setRange(3, 20)
+        self.s_image3d_rows = QSpinBox(); self.s_image3d_rows.setRange(3, 20)
+        self.s_image3d_square = QDoubleSpinBox(); self.s_image3d_square.setRange(1.0, 100.0); self.s_image3d_square.setDecimals(2); self.s_image3d_square.setSuffix(" mm")
+        self.s_image3d_samples = QSpinBox(); self.s_image3d_samples.setRange(4, 50)
+        self.s_image3d_blur = QSpinBox(); self.s_image3d_blur.setRange(3, 31); self.s_image3d_blur.setSingleStep(2)
+        self.s_image3d_area = QSpinBox(); self.s_image3d_area.setRange(100, 500000)
+        self.chk_image3d_debug = QCheckBox("Image 3D debug by default")
+
+        ig.addWidget(QLabel("Chessboard cols"), 0, 0); ig.addWidget(self.s_image3d_cols, 0, 1)
+        ig.addWidget(QLabel("Chessboard rows"), 1, 0); ig.addWidget(self.s_image3d_rows, 1, 1)
+        ig.addWidget(QLabel("Square size"), 2, 0); ig.addWidget(self.s_image3d_square, 2, 1)
+        ig.addWidget(QLabel("Min calib views"), 3, 0); ig.addWidget(self.s_image3d_samples, 3, 1)
+        ig.addWidget(QLabel("Blur kernel"), 4, 0); ig.addWidget(self.s_image3d_blur, 4, 1)
+        ig.addWidget(QLabel("Min contour area"), 5, 0); ig.addWidget(self.s_image3d_area, 5, 1)
+        ig.addWidget(self.chk_image3d_debug, 6, 0, 1, 2)
+
+        row2.addWidget(card("Image 3D", image3d), 1)
 
         actions = QWidget()
         al = QVBoxLayout(actions)
@@ -1918,6 +2191,14 @@ class MainWindow(QMainWindow):
         self.s_hold.setValue(float(self.cfg.hold_seconds))
         self.s_every.setValue(int(self.cfg.detect_every_n_frames))
         self.s_cam_index.setValue(int(self.cfg.cam_index))
+        self.s_image3d_cols.setValue(int(self.cfg.image3d_chessboard_cols))
+        self.s_image3d_rows.setValue(int(self.cfg.image3d_chessboard_rows))
+        self.s_image3d_square.setValue(float(self.cfg.image3d_square_size_mm))
+        self.s_image3d_samples.setValue(int(self.cfg.image3d_min_calibration_frames))
+        self.s_image3d_blur.setValue(int(self.cfg.image3d_blur_kernel_size))
+        self.s_image3d_area.setValue(int(self.cfg.image3d_min_contour_area))
+        self.chk_image3d_debug.setChecked(bool(self.cfg.image3d_debug))
+        self.image3d_chk_debug.setChecked(bool(self.cfg.image3d_debug))
 
         # Target object selection
         if hasattr(self, "cmb_target"):
@@ -1940,6 +2221,13 @@ class MainWindow(QMainWindow):
         self.cfg.hold_seconds = float(self.s_hold.value())
         self.cfg.detect_every_n_frames = int(self.s_every.value())
         self.cfg.cam_index = int(self.s_cam_index.value())
+        self.cfg.image3d_chessboard_cols = int(self.s_image3d_cols.value())
+        self.cfg.image3d_chessboard_rows = int(self.s_image3d_rows.value())
+        self.cfg.image3d_square_size_mm = float(self.s_image3d_square.value())
+        self.cfg.image3d_min_calibration_frames = int(self.s_image3d_samples.value())
+        self.cfg.image3d_blur_kernel_size = int(self.s_image3d_blur.value())
+        self.cfg.image3d_min_contour_area = int(self.s_image3d_area.value())
+        self.cfg.image3d_debug = bool(self.chk_image3d_debug.isChecked())
 
         if hasattr(self, "cmb_target"):
             self.cfg.target_object = str(self.cmb_target.currentText()).strip()
@@ -1947,8 +2235,11 @@ class MainWindow(QMainWindow):
 
         self.cfg.auto_camera_from_radar = bool(self.chk_auto_cam.isChecked())
         self.cfg.opencv_detect = bool(self.chk_detect.isChecked())
+        self.image3d_chk_debug.setChecked(bool(self.cfg.image3d_debug))
 
         self.radar_widget.update_config(self.cfg)
+        self._refresh_image3d_backend()
+        self._update_image3d_status_labels()
         self.statusBar().showMessage("Settings applied")
 
     def save_config(self):
