@@ -2288,6 +2288,7 @@ class MainWindow(QMainWindow):
     # ---------- CLEANUP ----------
     def closeEvent(self, event):
         self.close_camera()
+        self.stop_image3d_camera()
         self.disconnect_serial()
         event.accept()
 
