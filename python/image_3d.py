@@ -245,28 +245,93 @@ class SingleCameraChessboardMeasurer:
         combined = cv2.dilate(combined, morph_kernel, iterations=2)
         combined = cv2.erode(combined, morph_kernel, iterations=1)
 
-        if board_mask is not None:
-            combined = cv2.bitwise_and(combined, cv2.bitwise_not(board_mask))
-
-        contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         frame_area = frame_bgr.shape[0] * frame_bgr.shape[1]
         max_area = frame_area * float(self.config.max_contour_area_fraction)
-        valid = [
-            contour
-            for contour in contours
-            if self.config.min_contour_area < cv2.contourArea(contour) < max_area
-        ]
-        contour = max(valid, key=cv2.contourArea) if valid else None
+
+        def valid_contours(mask_img: np.ndarray, max_allowed_area: float) -> list[np.ndarray]:
+            contours, _ = cv2.findContours(mask_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            return [
+                contour
+                for contour in contours
+                if self.config.min_contour_area < cv2.contourArea(contour) < max_allowed_area
+            ]
+
+        search_outside = combined
+        search_inside = None
+        candidates: list[np.ndarray] = []
+
+        if board_mask is not None:
+            # Outside board: classic mode when object is near the reference plane.
+            search_outside = cv2.bitwise_and(combined, cv2.bitwise_not(board_mask))
+            candidates.extend(valid_contours(search_outside, max_area))
+
+            # Inside board: helps when object is placed on top of the chessboard.
+            inner_mask = cv2.erode(
+                board_mask,
+                cv2.getStructuringElement(cv2.MORPH_RECT, (17, 17)),
+                iterations=1,
+            )
+            search_inside = cv2.bitwise_and(combined, inner_mask)
+            board_area = float(cv2.countNonZero(inner_mask))
+            inside_max_area = max(float(self.config.min_contour_area) * 1.5, board_area * 0.55)
+            candidates.extend(valid_contours(search_inside, inside_max_area))
+        else:
+            candidates.extend(valid_contours(search_outside, max_area))
+
+        contour = max(candidates, key=cv2.contourArea) if candidates else None
 
         debug_images = {
             "gray": gray,
             "threshold": threshold,
             "edges": edges,
             "combined": combined,
+            "search_outside": search_outside,
         }
+        if search_inside is not None:
+            debug_images["search_inside"] = search_inside
         if not debug:
             debug_images = {}
         return contour, debug_images
+
+    def _estimate_mm_per_pixel_from_corners(self, corners: np.ndarray) -> Optional[float]:
+        """Estimate mm-per-pixel directly from chessboard corners (no full calibration)."""
+        cols, rows = self.config.chessboard_size
+        if cols < 2 and rows < 2:
+            return None
+
+        pts = corners.reshape(rows, cols, 2)
+        distances = []
+
+        if cols >= 2:
+            dx = pts[:, 1:, :] - pts[:, :-1, :]
+            distances.extend(np.linalg.norm(dx, axis=2).ravel().tolist())
+        if rows >= 2:
+            dy = pts[1:, :, :] - pts[:-1, :, :]
+            distances.extend(np.linalg.norm(dy, axis=2).ravel().tolist())
+
+        distances = [d for d in distances if d > 1e-6]
+        if not distances:
+            return None
+
+        mean_px = float(np.mean(distances))
+        return float(self.config.square_size_mm) / mean_px
+
+    def _measure_dimensions_without_calibration(
+        self,
+        contour: np.ndarray,
+        corners: np.ndarray,
+    ) -> tuple[Optional[float], Optional[float], np.ndarray]:
+        """Approximate width/length in mm from local chessboard scale only."""
+        rect = cv2.minAreaRect(contour)
+        box = cv2.boxPoints(rect)
+        mm_per_pixel = self._estimate_mm_per_pixel_from_corners(corners)
+        if mm_per_pixel is None:
+            return None, None, np.intp(box)
+
+        side_a, side_b = rect[1]
+        width_mm = min(side_a, side_b) * mm_per_pixel
+        length_mm = max(side_a, side_b) * mm_per_pixel
+        return float(width_mm), float(length_mm), np.intp(box)
 
     def _project_to_plane(
         self,
@@ -402,11 +467,42 @@ class SingleCameraChessboardMeasurer:
             found, corners = self.detect_chessboard(preview)
             if found and corners is not None:
                 cv2.drawChessboardCorners(preview, self.config.chessboard_size, corners, found)
+                board_mask = self._board_mask(preview.shape, corners)
+                contour, debug_images = self._detect_object_contour(preview, board_mask, debug)
+                if contour is not None:
+                    width_mm, length_mm, box = self._measure_dimensions_without_calibration(contour, corners)
+                    cv2.drawContours(preview, [contour], -1, (0, 255, 0), 2)
+                    cv2.drawContours(preview, [box], -1, (0, 255, 255), 2)
+
+                    if width_mm is not None and length_mm is not None:
+                        self._draw_multiline_text(
+                            preview,
+                            [
+                                f"Approx width: {width_mm:.1f} mm",
+                                f"Approx length: {length_mm:.1f} mm",
+                                "Run calibration for full pose and better accuracy.",
+                            ],
+                            (255, 255, 0),
+                        )
+                        state = Image3DState(
+                            frame_bgr=preview,
+                            board_visible=True,
+                            object_visible=True,
+                            message="Approximate measurement (no calibration).",
+                            width_mm=float(width_mm),
+                            length_mm=float(length_mm),
+                            estimated_height_mm=None,
+                            rms_error=self.rms_error,
+                            calibration_samples=len(self.image_points),
+                        )
+                        return state, debug_images
+
             self._draw_multiline_text(
                 preview,
                 [
-                    "Calibration required before Image 3D measurement.",
+                    "Calibration required for full Image 3D measurement.",
                     f"Show board {self.config.chessboard_cols}x{self.config.chessboard_rows} and capture samples.",
+                    "Tip: keep object near or on the board with good contrast.",
                 ],
                 (0, 180, 255),
             )

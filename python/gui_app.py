@@ -603,6 +603,10 @@ class MainWindow(QMainWindow):
 
         self.refresh_ports()
         self._apply_cfg_to_ui()
+        self.home_timer = QTimer()
+        self.home_timer.timeout.connect(self._refresh_home_dashboard)
+        self.home_timer.start(500)
+        self._refresh_home_dashboard()
         self.goto_home()
 
     def _get_object_list(self):
@@ -877,21 +881,11 @@ class MainWindow(QMainWindow):
 
     def start_image3d_camera(self):
         self._stop_other_camera_modes()
-        try:
-            if getattr(self, "measure_running", False):
-                self.stop_measure_camera()
-        except Exception:
-            pass
-        try:
-            if getattr(self, "face_tracking_running", False):
-                self.stop_face_tracking_camera()
-        except Exception:
-            pass
-
-        self.image3d_cap = cv2.VideoCapture(self.cfg.cam_index)
+        self.image3d_cap = self._open_cv_camera_capture(self.cfg.cam_index)
         if not self.image3d_cap.isOpened():
             self.image3d_label.setText("Camera not found")
             self.image3d_status.setText("Unable to open camera for Image 3D.")
+            self.statusBar().showMessage("Image 3D: unable to open camera (camera busy or unavailable)")
             return
 
         self.image3d_running = True
@@ -983,7 +977,7 @@ class MainWindow(QMainWindow):
 
         width_text = f"{state.width_mm:.1f} mm" if state.width_mm is not None else "N/A"
         length_text = f"{state.length_mm:.1f} mm" if state.length_mm is not None else "N/A"
-        height_text = f"~{state.estimated_height_mm:.1f} mm" if state.estimated_height_mm is not None else "N/A"
+        height_text = f"~{state.estimated_height_mm:.1f} mm" if state.estimated_height_mm is not None else "N/A (need calibration)"
         rms_text = f"{state.rms_error:.4f} px" if state.rms_error is not None else "N/A"
         self.image3d_results.setText(
             f"Width: {width_text}\n"
@@ -1094,7 +1088,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Unable to start object detection: YOLO model unavailable")
             return
 
-        self.object_detection_cap = cv2.VideoCapture(self.cfg.cam_index)
+        self.object_detection_cap = self._open_cv_camera_capture(self.cfg.cam_index)
         if not self.object_detection_cap.isOpened():
             self.object_detection_label.setText("Camera not found")
             self.statusBar().showMessage("Unable to start object detection: camera not found")
@@ -1180,7 +1174,7 @@ class MainWindow(QMainWindow):
 
     def start_measure_camera(self):
         self._stop_other_camera_modes()
-        self.measure_cap = cv2.VideoCapture(self.cfg.cam_index)
+        self.measure_cap = self._open_cv_camera_capture(self.cfg.cam_index)
         if not self.measure_cap.isOpened():
             self.measure_label.setText("Camera not found")
             return
@@ -1448,28 +1442,211 @@ class MainWindow(QMainWindow):
         h.addWidget(t)
 
         msg = QLabel(
-            "App pro: menu, pages, settings, capture d’écran et config.\n"
-            "• Live: radar + caméra + OpenCV\n"
-            "• Settings: seuils, calibration, performance\n"
-            "• Screenshot: preuve visuelle pour la démo (dossier screenshots/)."
+            "Pilote rapidement les modules principaux depuis Home.\n"
+            "• Navigation directe vers chaque fonctionnalite\n"
+            "• Actions systeme (serie, camera, capture, configuration)\n"
+            "• Etat temps reel radar/camera et derniers screenshots"
         )
         msg.setStyleSheet("color:#94a3b8;")
+        msg.setWordWrap(True)
         h.addWidget(msg)
 
         btn_row = QHBoxLayout()
-        b1 = QPushButton("Go to Live")
+        b1 = QPushButton("Open Live")
         b1.clicked.connect(self.goto_live)
-        b2 = QPushButton("Open Settings")
-        b2.setObjectName("SecondaryBtn")
-        b2.clicked.connect(self.goto_settings)
+        b2 = QPushButton("Open Object Detection")
+        b2.clicked.connect(self.goto_object_detection)
+        b3 = QPushButton("Open Settings")
+        b3.setObjectName("SecondaryBtn")
+        b3.clicked.connect(self.goto_settings)
         btn_row.addWidget(b1)
         btn_row.addWidget(b2)
+        btn_row.addWidget(b3)
         btn_row.addStretch()
         h.addLayout(btn_row)
 
+        quick_nav = QFrame()
+        quick_nav.setObjectName("Card")
+        qn = QGridLayout(quick_nav)
+        qn.setContentsMargins(16, 16, 16, 16)
+        qn.setHorizontalSpacing(10)
+        qn.setVerticalSpacing(10)
+
+        nav_buttons = [
+            ("Live", self.goto_live),
+            ("Face Tracking", self.goto_face_tracking),
+            ("Mesure d'objet", self.goto_measure),
+            ("Image 3D", self.goto_image_3d),
+            ("Object Detection", self.goto_object_detection),
+            ("Settings", self.goto_settings),
+        ]
+        for idx, (label, callback) in enumerate(nav_buttons):
+            btn = QPushButton(label)
+            btn.setObjectName("SecondaryBtn")
+            btn.clicked.connect(callback)
+            qn.addWidget(btn, idx // 3, idx % 3)
+
+        system = QFrame()
+        system.setObjectName("Card")
+        sys_lay = QVBoxLayout(system)
+        sys_lay.setContentsMargins(16, 16, 16, 16)
+        sys_lay.setSpacing(10)
+
+        system_title = QLabel("Actions rapides")
+        system_title.setObjectName("CardTitle")
+        sys_lay.addWidget(system_title)
+
+        sys_row1 = QHBoxLayout()
+        self.home_btn_connect = QPushButton("Connect serial")
+        self.home_btn_connect.setObjectName("SecondaryBtn")
+        self.home_btn_connect.clicked.connect(self.toggle_connect)
+
+        self.home_btn_camera = QPushButton("Start camera")
+        self.home_btn_camera.clicked.connect(self.toggle_camera)
+
+        self.home_btn_shot = QPushButton("Screenshot")
+        self.home_btn_shot.setObjectName("SecondaryBtn")
+        self.home_btn_shot.clicked.connect(self.take_screenshot_auto)
+
+        sys_row1.addWidget(self.home_btn_connect)
+        sys_row1.addWidget(self.home_btn_camera)
+        sys_row1.addWidget(self.home_btn_shot)
+        sys_lay.addLayout(sys_row1)
+
+        sys_row2 = QHBoxLayout()
+        self.home_btn_save_cfg = QPushButton("Save config")
+        self.home_btn_save_cfg.setObjectName("SecondaryBtn")
+        self.home_btn_save_cfg.clicked.connect(self.save_config)
+
+        self.home_btn_open_cfg = QPushButton("Open config")
+        self.home_btn_open_cfg.setObjectName("SecondaryBtn")
+        self.home_btn_open_cfg.clicked.connect(self.open_config_dialog)
+
+        self.home_btn_refresh_shots = QPushButton("Refresh screenshots")
+        self.home_btn_refresh_shots.setObjectName("SecondaryBtn")
+        self.home_btn_refresh_shots.clicked.connect(self._refresh_home_dashboard)
+
+        sys_row2.addWidget(self.home_btn_save_cfg)
+        sys_row2.addWidget(self.home_btn_open_cfg)
+        sys_row2.addWidget(self.home_btn_refresh_shots)
+        sys_lay.addLayout(sys_row2)
+
+        status = QFrame()
+        status.setObjectName("Card")
+        st = QGridLayout(status)
+        st.setContentsMargins(16, 16, 16, 16)
+        st.setHorizontalSpacing(16)
+        st.setVerticalSpacing(8)
+
+        status_title = QLabel("Statut du systeme")
+        status_title.setObjectName("CardTitle")
+        st.addWidget(status_title, 0, 0, 1, 2)
+
+        self.home_stat_serial = QLabel("Serial: --")
+        self.home_stat_camera = QLabel("Camera: --")
+        self.home_stat_radar = QLabel("Radar state: --")
+        self.home_stat_distance = QLabel("Distance: --")
+        self.home_stat_auto = QLabel("Auto camera: --")
+        self.home_stat_detect = QLabel("OpenCV detect: --")
+        self.home_stat_target = QLabel("Target: --")
+        self.home_stat_shots = QLabel("Screenshots: --")
+
+        stats = [
+            self.home_stat_serial,
+            self.home_stat_camera,
+            self.home_stat_radar,
+            self.home_stat_distance,
+            self.home_stat_auto,
+            self.home_stat_detect,
+            self.home_stat_target,
+            self.home_stat_shots,
+        ]
+        for i, lbl in enumerate(stats):
+            lbl.setStyleSheet("color:#cbd5e1;")
+            st.addWidget(lbl, 1 + (i // 2), i % 2)
+
+        recent = QFrame()
+        recent.setObjectName("Card")
+        rc = QVBoxLayout(recent)
+        rc.setContentsMargins(16, 16, 16, 16)
+        rc.setSpacing(8)
+
+        rt = QLabel("Derniers screenshots")
+        rt.setObjectName("CardTitle")
+        rc.addWidget(rt)
+
+        self.home_shot_1 = QLabel("Aucun screenshot")
+        self.home_shot_2 = QLabel("-")
+        self.home_shot_3 = QLabel("-")
+
+        for lbl in [self.home_shot_1, self.home_shot_2, self.home_shot_3]:
+            lbl.setStyleSheet("color:#94a3b8;")
+            rc.addWidget(lbl)
+
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        row.addWidget(quick_nav, 2)
+        row.addWidget(system, 2)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(12)
+        bottom.addWidget(status, 3)
+        bottom.addWidget(recent, 2)
+
         lay.addWidget(hero)
+        lay.addLayout(row)
+        lay.addLayout(bottom)
         lay.addStretch()
         return page
+
+    def _refresh_home_dashboard(self):
+        if not hasattr(self, "home_stat_serial"):
+            return
+
+        serial_ok = self.ser is not None and bool(getattr(self.ser, "is_open", True))
+        cam_ok = self.cam is not None and self.camera_thread is not None and self.camera_thread.isRunning()
+        auto_mode = bool(self.chk_auto_cam.isChecked()) if hasattr(self, "chk_auto_cam") else bool(self.cfg.auto_camera_from_radar)
+        detect_mode = bool(self.chk_detect.isChecked()) if hasattr(self, "chk_detect") else bool(self.cfg.opencv_detect)
+
+        self.home_stat_serial.setText(f"Serial: {'Connected' if serial_ok else 'Disconnected'}")
+        self.home_stat_camera.setText(f"Camera: {'Running' if cam_ok else 'Stopped'}")
+        self.home_stat_radar.setText(f"Radar state: {str(self.state).upper()}")
+        if self.last_distance is None:
+            self.home_stat_distance.setText("Distance: N/A")
+        else:
+            self.home_stat_distance.setText(f"Distance: {self.last_distance:.1f} cm")
+        self.home_stat_auto.setText(f"Auto camera: {'ON' if auto_mode else 'OFF'}")
+        self.home_stat_detect.setText(f"OpenCV detect: {'ON' if detect_mode else 'OFF'}")
+        self.home_stat_target.setText(f"Target: {self.target_object}")
+
+        if hasattr(self, "home_btn_connect"):
+            self.home_btn_connect.setText("Disconnect serial" if serial_ok else "Connect serial")
+        if hasattr(self, "home_btn_camera"):
+            self.home_btn_camera.setText("Stop camera" if cam_ok else "Start camera")
+
+        self._refresh_home_screenshots()
+
+    def _refresh_home_screenshots(self):
+        if not hasattr(self, "home_shot_1"):
+            return
+
+        SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        files = sorted(
+            SCREENSHOT_DIR.glob("ui_*.png"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+
+        self.home_stat_shots.setText(f"Screenshots: {len(files)}")
+
+        labels = [self.home_shot_1, self.home_shot_2, self.home_shot_3]
+        for i, lbl in enumerate(labels):
+            if i < len(files):
+                lbl.setText(files[i].name)
+            elif i == 0:
+                lbl.setText("Aucun screenshot")
+            else:
+                lbl.setText("-")
 
     def _build_live_page(self) -> QWidget:
         page = QWidget()
@@ -1747,6 +1924,11 @@ class MainWindow(QMainWindow):
     def _stop_other_camera_modes(self):
         """Ensure only one OpenCV capture is active to avoid backend conflicts."""
         try:
+            if self.cam is not None:
+                self.close_camera()
+        except Exception:
+            pass
+        try:
             if getattr(self, "object_detection_running", False):
                 self.stop_object_detection()
         except Exception:
@@ -1766,6 +1948,31 @@ class MainWindow(QMainWindow):
                 self.stop_image3d_camera()
         except Exception:
             pass
+
+    def _open_cv_camera_capture(self, cam_index: int):
+        """Open a camera with backends that work reliably on Windows."""
+        for backend in (cv2.CAP_DSHOW, cv2.CAP_MSMF, None):
+            cam = None
+            try:
+                if backend is None:
+                    cam = cv2.VideoCapture(int(cam_index))
+                else:
+                    cam = cv2.VideoCapture(int(cam_index), backend)
+                if cam is not None and cam.isOpened():
+                    try:
+                        cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    except Exception:
+                        pass
+                    return cam
+                if cam is not None:
+                    cam.release()
+            except Exception:
+                try:
+                    if cam is not None:
+                        cam.release()
+                except Exception:
+                    pass
+        return cv2.VideoCapture(int(cam_index))
 
     def _on_camera_error(self, message: str):
         self.statusBar().showMessage(message)
@@ -2163,6 +2370,15 @@ class MainWindow(QMainWindow):
         self.cfg.opencv_detect = self.chk_detect.isChecked()
 
         if not self.cfg.auto_camera_from_radar:
+            return
+
+        # Do not let radar automation steal the camera when another mode is active.
+        if (
+            self.image3d_running
+            or getattr(self, "object_detection_running", False)
+            or getattr(self, "measure_running", False)
+            or getattr(self, "face_tracking_running", False)
+        ):
             return
 
         now = time.time()
