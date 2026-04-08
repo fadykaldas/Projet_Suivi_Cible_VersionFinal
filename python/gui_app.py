@@ -643,6 +643,7 @@ class MainWindow(QMainWindow):
 
         view_menu.addAction(QAction("Home", self, triggered=self.goto_home))
         view_menu.addAction(QAction("Live", self, triggered=self.goto_live))
+        view_menu.addAction(QAction("Image 3D", self, triggered=self.goto_image_3d))
         view_menu.addAction(QAction("Settings", self, triggered=self.goto_settings))
         help_menu.addAction(QAction("About", self, triggered=self.goto_about))
 
@@ -675,6 +676,7 @@ class MainWindow(QMainWindow):
         self.btn_live = self._nav_button("  📡  Live", self.goto_live)
         self.btn_face_tracking = self._nav_button("  🎯  Face Tracking", self.goto_face_tracking)
         self.btn_measure = self._nav_button("  📏  Mesure d'objet", self.goto_measure)
+        self.btn_image_3d = self._nav_button("  🧊  Image 3D", self.goto_image_3d)
         self.btn_object_detection = self._nav_button("  🔎  Object Detection", self.goto_object_detection)
         self.btn_settings = self._nav_button("  ⚙️  Settings", self.goto_settings)
         self.btn_about = self._nav_button("  ℹ️  About", self.goto_about)
@@ -683,6 +685,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.btn_live)
         lay.addWidget(self.btn_face_tracking)
         lay.addWidget(self.btn_measure)
+        lay.addWidget(self.btn_image_3d)
         lay.addWidget(self.btn_object_detection)
         lay.addWidget(self.btn_settings)
         lay.addWidget(self.btn_about)
@@ -695,7 +698,7 @@ class MainWindow(QMainWindow):
         return sidebar
 
     def _set_nav_checked(self, which: str):
-        for b in [self.btn_home, self.btn_live, self.btn_face_tracking, self.btn_measure, self.btn_object_detection, self.btn_settings, self.btn_about]:
+        for b in [self.btn_home, self.btn_live, self.btn_face_tracking, self.btn_measure, self.btn_image_3d, self.btn_object_detection, self.btn_settings, self.btn_about]:
             b.setChecked(False)
         getattr(self, which).setChecked(True)
 
@@ -746,6 +749,12 @@ class MainWindow(QMainWindow):
         self.lbl_title.setText("Mesure d'objet")
         self.lbl_sub.setText("Mesure avancée : calibration, contours, surface")
         self._set_nav_checked("btn_measure")
+
+    def goto_image_3d(self):
+        self.pages.setCurrentIndex(4)
+        self.lbl_title.setText("Image 3D")
+        self.lbl_sub.setText("Mesure 3D basée sur damier et calibration")
+        self._set_nav_checked("btn_image_3d")
 
     def _build_object_detection_page(self) -> QWidget:
         page = QWidget()
@@ -805,7 +814,7 @@ class MainWindow(QMainWindow):
         return page
 
     def goto_object_detection(self):
-        self.pages.setCurrentIndex(4)
+        self.pages.setCurrentIndex(5)
         self.lbl_title.setText("Object Detection")
         self.lbl_sub.setText("YOLO object detection with custom search and Arduino buzzer")
         self._set_nav_checked("btn_object_detection")
@@ -1372,13 +1381,13 @@ class MainWindow(QMainWindow):
         self._set_nav_checked("btn_live")
 
     def goto_settings(self):
-        self.pages.setCurrentIndex(5)
+        self.pages.setCurrentIndex(6)
         self.lbl_title.setText("Settings")
         self.lbl_sub.setText("Seuils • calibration • performance • config")
         self._set_nav_checked("btn_settings")
 
     def goto_about(self):
-        self.pages.setCurrentIndex(6)
+        self.pages.setCurrentIndex(7)
         self.lbl_title.setText("About")
         self.lbl_sub.setText("Infos du projet")
         self._set_nav_checked("btn_about")
