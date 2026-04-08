@@ -1087,6 +1087,7 @@ class MainWindow(QMainWindow):
             self.start_object_detection()
 
     def start_object_detection(self):
+        self._stop_other_camera_modes()
         self.apply_object_detection_target()
         if self.yolo is None:
             self.object_detection_label.setText("YOLO model unavailable")
@@ -1178,6 +1179,7 @@ class MainWindow(QMainWindow):
             self.stop_measure_camera()
 
     def start_measure_camera(self):
+        self._stop_other_camera_modes()
         self.measure_cap = cv2.VideoCapture(self.cfg.cam_index)
         if not self.measure_cap.isOpened():
             self.measure_label.setText("Camera not found")
@@ -1311,6 +1313,7 @@ class MainWindow(QMainWindow):
             self.stop_face_tracking_camera()
 
     def start_face_tracking_camera(self):
+        self._stop_other_camera_modes()
         self.face_tracking_cap = cv2.VideoCapture(self.cfg.cam_index)
         if not self.face_tracking_cap.isOpened():
             self.face_tracking_label.setText("Camera not found")
@@ -1748,6 +1751,21 @@ class MainWindow(QMainWindow):
                 self.stop_object_detection()
         except Exception:
             pass
+        try:
+            if getattr(self, "measure_running", False):
+                self.stop_measure_camera()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "face_tracking_running", False):
+                self.stop_face_tracking_camera()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "image3d_running", False):
+                self.stop_image3d_camera()
+        except Exception:
+            pass
 
     def _on_camera_error(self, message: str):
         self.statusBar().showMessage(message)
@@ -1768,6 +1786,11 @@ class MainWindow(QMainWindow):
         try:
             if getattr(self, "face_tracking_running", False):
                 self.stop_face_tracking_camera()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "image3d_running", False):
+                self.stop_image3d_camera()
         except Exception:
             pass
 
