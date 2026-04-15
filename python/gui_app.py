@@ -979,12 +979,16 @@ class MainWindow(QMainWindow):
         length_text = f"{state.length_mm:.1f} mm" if state.length_mm is not None else "N/A"
         height_text = f"~{state.estimated_height_mm:.1f} mm" if state.estimated_height_mm is not None else "N/A (need calibration)"
         rms_text = f"{state.rms_error:.4f} px" if state.rms_error is not None else "N/A"
+        board_pos_text = ""
+        if state.x_board_mm is not None and state.y_board_mm is not None:
+            board_pos_text = f"Board Pos: ({state.x_board_mm:.1f}, {state.y_board_mm:.1f}) mm\n"
         self.image3d_results.setText(
             f"Width: {width_text}\n"
             f"Length: {length_text}\n"
             f"Height: {height_text}\n"
             f"RMS: {rms_text}\n"
-            f"Samples: {state.calibration_samples}"
+            f"Samples: {state.calibration_samples}\n"
+            f"{board_pos_text}"
         )
         self.image3d_status.setText(state.message)
 

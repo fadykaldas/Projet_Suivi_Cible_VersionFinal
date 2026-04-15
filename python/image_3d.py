@@ -40,6 +40,8 @@ class Image3DState:
     estimated_height_mm: Optional[float] = None
     rms_error: Optional[float] = None
     calibration_samples: int = 0
+    x_board_mm: Optional[float] = None
+    y_board_mm: Optional[float] = None
 
 
 class SingleCameraChessboardMeasurer:
@@ -588,21 +590,28 @@ class SingleCameraChessboardMeasurer:
             rect = cv2.minAreaRect(contour)
             cx, cy = int(rect[0][0]), int(rect[0][1])
 
-        label_lines = [
-            f"Width: {width_mm:.1f} mm",
-            f"Length: {length_mm:.1f} mm",
-            f"Height: ~{estimated_height_mm:.1f} mm (estimate)",
-        ]
-        for idx, line in enumerate(label_lines):
-            cv2.putText(display, line, (cx - 80, cy - 18 + (idx * 24)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-            cv2.putText(display, line, (cx - 80, cy - 18 + (idx * 24)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2, cv2.LINE_AA)
-
-        info_lines = [
-            f"RMS: {self.rms_error:.4f} px" if self.rms_error is not None else "RMS: N/A",
-            "Width/length are on-plane values.",
-            "Height is approximate with one RGB camera.",
-        ]
-        self._draw_multiline_text(display, info_lines, (255, 255, 255))
+        # Project centroid onto board plane (approximate, no calibration)
+        board_point = None
+        if corners is not None:
+            # Use the first and last corner to estimate axes
+            c0 = corners[0][0]
+            c1 = corners[-1][0]
+            # crude axes: x along width, y along height
+            # Not accurate, but gives a rough estimate
+            board_origin = c0
+            dx = c1[0] - c0[0]
+            dy = c1[1] - c0[1]
+            if abs(dx) > 1e-3:
+                x_board_mm = (cx - board_origin[0]) * float(self.config.square_size_mm) * (self.config.chessboard_cols-1) / dx
+            else:
+                x_board_mm = None
+            if abs(dy) > 1e-3:
+                y_board_mm = (cy - board_origin[1]) * float(self.config.square_size_mm) * (self.config.chessboard_rows-1) / dy
+            else:
+                y_board_mm = None
+        else:
+            x_board_mm = None
+            y_board_mm = None
 
         state = Image3DState(
             frame_bgr=display,
@@ -614,5 +623,7 @@ class SingleCameraChessboardMeasurer:
             estimated_height_mm=float(estimated_height_mm),
             rms_error=self.rms_error,
             calibration_samples=len(self.image_points),
+            x_board_mm=x_board_mm,
+            y_board_mm=y_board_mm,
         )
         return state, debug_images
