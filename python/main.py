@@ -1,23 +1,16 @@
 import cv2
 import time
-import re
-from collections import deque
-import statistics
 import serial
 import serial.tools.list_ports
 import argparse
 
 # -------- CONFIG --------
-PORT = "COM5"
+PORT = "COM3"  # Change to your Arduino port, e.g., COM3
 BAUD = 115200
 
-ON_THRESHOLD_CM = 60.0       # ouvrir caméra si distance <= 60 cm
-OFF_THRESHOLD_CM = 70.0      # fermer caméra si distance >= 70 cm (hysteresis)
-TRIGGER_CONFIRM_SEC = 2.0    # doit rester sous le seuil ON pendant 2s avant d'ouvrir
-
-HOLD_SECONDS = 2.0           # visage détecté 2 sec => CIBLE DETECTEE
-CAM_CLOSE_AFTER_RADAR_LOSS = 10.0  # close camera after 10s with no radar confirmation
 CAM_INDEX = 0
+FRAME_WIDTH = 640
+FRAME_HEIGHT = 480
 # ------------------------
 
 
