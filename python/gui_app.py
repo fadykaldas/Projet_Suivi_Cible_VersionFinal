@@ -2095,10 +2095,11 @@ class MainWindow(QMainWindow):
         vx = (x2 - x1) / dt
         vy = (y2 - y1) / dt
 
-        max_speed_px_per_sec = 2000.0
-        speed = math.sqrt(vx * vx + vy * vy)
-        if speed > max_speed_px_per_sec:
-            return
+        # Suppression du calcul de la vitesse
+        # max_speed_px_per_sec = 2000.0
+        # speed = math.sqrt(vx * vx + vy * vy)
+        # if speed > max_speed_px_per_sec:
+        #     return
 
         for i in range(1, self.cfg.trajectory_prediction_steps + 1):
             tf = i * self.cfg.trajectory_step_sec
@@ -2132,20 +2133,20 @@ class MainWindow(QMainWindow):
                 tipLength=0.25
             )
 
-            dt = max(self.target_track[-1][2] - self.target_track[-2][2], self.cfg.trajectory_min_dt)
-            vx = (x2 - x1) / dt
-            vy = (y2 - y1) / dt
-            speed = math.sqrt(vx * vx + vy * vy)
-
-            cv2.putText(
-                frame,
-                f"Vitesse: {speed:.1f} px/s",
-                (int(x2) + 10, int(y2) + 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 255),
-                2
-            )
+            # Suppression du calcul et de l'affichage de la vitesse
+            # dt = max(self.target_track[-1][2] - self.target_track[-2][2], self.cfg.trajectory_min_dt)
+            # vx = (x2 - x1) / dt
+            # vy = (y2 - y1) / dt
+            # speed = math.sqrt(vx * vx + vy * vy)
+            # cv2.putText(
+            #     frame,
+            #     f"Vitesse: {speed:.1f} px/s",
+            #     (int(x2) + 10, int(y2) + 20),
+            #     cv2.FONT_HERSHEY_SIMPLEX,
+            #     0.6,
+            #     (0, 255, 255),
+            #     2
+            # )
 
         for i, (xf, yf) in enumerate(self.predicted_points):
             if 0 <= xf < frame.shape[1] and 0 <= yf < frame.shape[0]:
