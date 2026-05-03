@@ -96,6 +96,17 @@ class AppConfig:
             return AppConfig()
 
 
+# ---- FACE TRACKING SERVO CONTROL ----
+SERVO_X_INVERT = 1
+SERVO_Y_INVERT = 1
+SERVO_SENSITIVITY_X = 0.40
+SERVO_SENSITIVITY_Y = 0.40
+SERVO_DEAD_ZONE_PX = 20
+SERVO_MAX_STEP_DEG = 4
+SERVO_SERIAL_SEND_THRESHOLD = 1
+SERVO_INITIAL_ANGLE = 90
+
+
 # -------------------- THEME (PRO LOOK) --------------------
 def apply_pro_theme(app: QApplication):
     app.setStyleSheet("""
@@ -496,6 +507,11 @@ class MainWindow(QMainWindow):
         self.state = "idle"
         self.detect_start = None
         self.loss_start = None
+
+        self.current_servo_angle_x = SERVO_INITIAL_ANGLE
+        self.current_servo_angle_y = SERVO_INITIAL_ANGLE
+        self.last_servo_angle_x = SERVO_INITIAL_ANGLE
+        self.last_servo_angle_y = SERVO_INITIAL_ANGLE
 
         self.cam = None
         self.camera_thread = None
@@ -1318,6 +1334,11 @@ class MainWindow(QMainWindow):
             return
         self.face_tracking_running = True
         self.btn_face_tracking_start.setText("Stop Face Tracking")
+        self.current_servo_angle_x = SERVO_INITIAL_ANGLE
+        self.current_servo_angle_y = SERVO_INITIAL_ANGLE
+        self.last_servo_angle_x = SERVO_INITIAL_ANGLE
+        self.last_servo_angle_y = SERVO_INITIAL_ANGLE
+        self._servo_send_angles(self.current_servo_angle_x, self.current_servo_angle_y, force=True)
         self.face_tracking_timer = QTimer()
         self.face_tracking_timer.timeout.connect(self.face_tracking_tick)
         self.face_tracking_timer.start(30)
@@ -1351,6 +1372,28 @@ class MainWindow(QMainWindow):
         else:
             cx = w // 2
             cy = h // 2
+
+        frame_center_x = w // 2
+        frame_center_y = h // 2
+        error_x = cx - frame_center_x
+        error_y = cy - frame_center_y
+
+        if abs(error_x) < SERVO_DEAD_ZONE_PX:
+            desired_angle_x = self.current_servo_angle_x
+        else:
+            desired_angle_x = 90 + (error_x / frame_center_x) * 90 * SERVO_SENSITIVITY_X * SERVO_X_INVERT
+        if abs(error_y) < SERVO_DEAD_ZONE_PX:
+            desired_angle_y = self.current_servo_angle_y
+        else:
+            desired_angle_y = 90 + (error_y / frame_center_y) * 90 * SERVO_SENSITIVITY_Y * SERVO_Y_INVERT
+
+        desired_angle_x = self._servo_clamp(desired_angle_x)
+        desired_angle_y = self._servo_clamp(desired_angle_y)
+
+        self.current_servo_angle_x = self._servo_move_towards(self.current_servo_angle_x, desired_angle_x, SERVO_MAX_STEP_DEG)
+        self.current_servo_angle_y = self._servo_move_towards(self.current_servo_angle_y, desired_angle_y, SERVO_MAX_STEP_DEG)
+        self._servo_send_angles(self.current_servo_angle_x, self.current_servo_angle_y)
+
         # Dessiner crosshair
         color = (0, 0, 255) if len(faces) > 0 else (100, 100, 100)
         cv2.drawMarker(frame, (cx, cy), color, markerType=cv2.MARKER_CROSS, markerSize=40, thickness=2)
@@ -1977,6 +2020,28 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
         return cv2.VideoCapture(int(cam_index))
+
+    def _servo_clamp(self, value: float) -> int:
+        return int(max(0, min(180, round(value))))
+
+    def _servo_move_towards(self, current: float, target: float, max_step: int) -> int:
+        delta = target - current
+        if abs(delta) <= max_step:
+            return int(round(target))
+        return int(round(current + max_step if delta > 0 else current - max_step))
+
+    def _servo_send_angles(self, angle_x: int, angle_y: int, force: bool = False):
+        if self.ser is None or not getattr(self.ser, "is_open", False):
+            return
+        if not force and abs(angle_x - self.last_servo_angle_x) < SERVO_SERIAL_SEND_THRESHOLD and abs(angle_y - self.last_servo_angle_y) < SERVO_SERIAL_SEND_THRESHOLD:
+            return
+        payload = f"{angle_x},{angle_y}\n"
+        try:
+            self.ser.write(payload.encode("ascii"))
+            self.last_servo_angle_x = angle_x
+            self.last_servo_angle_y = angle_y
+        except Exception:
+            pass
 
     def _on_camera_error(self, message: str):
         self.statusBar().showMessage(message)
