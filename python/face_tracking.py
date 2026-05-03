@@ -3,7 +3,7 @@ import serial
 import time
 
 # Configuration
-PORT = "COM3"  # Change to your Arduino port
+PORT = "COM5"  # Change to your Arduino port
 BAUD = 115200
 CAM_INDEX = 0
 FRAME_WIDTH = 640

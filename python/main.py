@@ -5,7 +5,7 @@ import serial.tools.list_ports
 import argparse
 
 # -------- CONFIG --------
-PORT = "COM3"  # Change to your Arduino port, e.g., COM3
+PORT = "COM5"  # Change to your Arduino port, e.g., COM5
 BAUD = 115200
 
 CAM_INDEX = 0
