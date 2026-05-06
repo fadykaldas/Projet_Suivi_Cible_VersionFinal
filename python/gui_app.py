@@ -101,7 +101,7 @@ SERVO_X_INVERT = 1
 SERVO_Y_INVERT = 1
 SERVO_SENSITIVITY_X = 0.40
 SERVO_SENSITIVITY_Y = 0.40
-SERVO_DEAD_ZONE_PX = 20
+SERVO_DEAD_ZONE_PX = 40    # pixels en deadzone autour du centre (30-50 recommande)
 SERVO_MAX_STEP_DEG = 4
 SERVO_SERIAL_SEND_THRESHOLD = 1
 SERVO_INITIAL_ANGLE = 90
@@ -552,6 +552,11 @@ class MainWindow(QMainWindow):
         self.latest_frame = None
         self.last_frame_bgr = None  # <- for saving camera snapshot
         self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+
+        # Port serie dedie au Face Tracker Arduino (independant du port radar self.ser)
+        self.ft_ser = None
+        self.ft_shared_with_main = False
+        self.face_tracking_running = False
 
         # YOLOv8 object detection (used for OpenCV tab)
         self.yolo = None
@@ -1372,19 +1377,63 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
 
-        self.face_tracking_label = self._create_video_label("Camera stopped")
+        # --- Panneau de connexion Arduino ---
+        conn_card = QFrame()
+        conn_card.setObjectName("Card")
+        conn_lay = QHBoxLayout(conn_card)
+        conn_lay.setContentsMargins(16, 12, 16, 12)
+        conn_lay.setSpacing(10)
 
-        self.btn_face_tracking_start = QPushButton("Start Face Tracking")
-        self.btn_face_tracking_start.setObjectName("SecondaryBtn")
+        self.ft_pill = QLabel("Arduino deconnecte")
+        self.ft_pill.setObjectName("PillRed")
+
+        self.ft_port_combo = QComboBox()
+        self.ft_port_combo.setMinimumWidth(220)
+
+        self.ft_btn_refresh = QPushButton("Actualiser")
+        self.ft_btn_refresh.setObjectName("SecondaryBtn")
+        self.ft_btn_refresh.clicked.connect(self._ft_refresh_ports)
+
+        self.ft_btn_connect = QPushButton("Connecter Arduino")
+        self.ft_btn_connect.clicked.connect(self._ft_toggle_connect)
+
+        conn_lay.addWidget(QLabel("Port Arduino servos:"))
+        conn_lay.addWidget(self.ft_port_combo, 1)
+        conn_lay.addWidget(self.ft_btn_refresh)
+        conn_lay.addWidget(self.ft_btn_connect)
+        conn_lay.addWidget(self.ft_pill)
+        conn_lay.addStretch()
+        self._ft_refresh_ports()
+
+        # --- Flux video ---
+        self.face_tracking_label = self._create_video_label("Camera arretee")
+
+        # --- Rangee de statut servo ---
+        self.ft_angle_x_label = QLabel("Servo X: 90°")
+        self.ft_angle_x_label.setObjectName("HomeKpi")
+        self.ft_angle_y_label = QLabel("Servo Y: 90°")
+        self.ft_angle_y_label.setObjectName("HomeKpi")
+        self.ft_status_label = QLabel("En attente du demarrage de la camera...")
+        self.ft_status_label.setStyleSheet("color:#94a3b8;")
+        self.ft_status_label.setWordWrap(True)
+
+        angle_row = QHBoxLayout()
+        angle_row.setSpacing(8)
+        angle_row.addWidget(self.ft_angle_x_label)
+        angle_row.addWidget(self.ft_angle_y_label)
+        angle_row.addStretch()
+
+        self.btn_face_tracking_start = QPushButton("Demarrer Face Tracking")
         self.btn_face_tracking_start.clicked.connect(self.toggle_face_tracking_camera)
 
-        lay.addWidget(card("Face Tracking (Crosshair)", self.face_tracking_label), 1)
+        lay.addWidget(conn_card)
+        lay.addWidget(card("Face Tracking — Servo Camera", self.face_tracking_label), 1)
+        lay.addLayout(angle_row)
+        lay.addWidget(self.ft_status_label)
         lay.addWidget(self.btn_face_tracking_start)
         return page
 
     def toggle_face_tracking_camera(self):
-        if not hasattr(self, 'face_tracking_running'):
-            self.face_tracking_running = False
         if not self.face_tracking_running:
             self.start_face_tracking_camera()
         else:
@@ -1392,93 +1441,298 @@ class MainWindow(QMainWindow):
 
     def start_face_tracking_camera(self):
         self._stop_other_camera_modes()
-        self.face_tracking_cap = cv2.VideoCapture(self.cfg.cam_index)
+        self.face_tracking_cap = self._open_cv_camera_capture(self.cfg.cam_index)
         if not self.face_tracking_cap.isOpened():
-            self.face_tracking_label.setText("Camera not found")
+            self.face_tracking_label.setText("Camera introuvable")
             return
         self.face_tracking_running = True
-        self.btn_face_tracking_start.setText("Stop Face Tracking")
+        self.btn_face_tracking_start.setText("Arreter Face Tracking")
+
+        # Centrer les servos au demarrage et envoyer la position initiale
         self.current_servo_angle_x = SERVO_INITIAL_ANGLE
         self.current_servo_angle_y = SERVO_INITIAL_ANGLE
         self.last_servo_angle_x = SERVO_INITIAL_ANGLE
         self.last_servo_angle_y = SERVO_INITIAL_ANGLE
-        self._servo_send_angles(self.current_servo_angle_x, self.current_servo_angle_y, force=True)
+        self._ft_send_angles(SERVO_INITIAL_ANGLE, SERVO_INITIAL_ANGLE, force=True)
+
         self.face_tracking_timer = QTimer()
         self.face_tracking_timer.timeout.connect(self.face_tracking_tick)
         self.face_tracking_timer.start(30)
 
+        ft_connected = (self.ft_ser is not None and getattr(self.ft_ser, "is_open", False))
+        if hasattr(self, "ft_status_label"):
+            self.ft_status_label.setText(
+                "Camera en cours... Servos actifs." if ft_connected
+                else "Camera en cours — Arduino non connecte (moteurs inactifs)"
+            )
+
     def stop_face_tracking_camera(self):
         self.face_tracking_running = False
-        self.btn_face_tracking_start.setText("Start Face Tracking")
-        if hasattr(self, 'face_tracking_timer'):
+        self.btn_face_tracking_start.setText("Demarrer Face Tracking")
+        if hasattr(self, "face_tracking_timer"):
             self.face_tracking_timer.stop()
-        if hasattr(self, 'face_tracking_cap'):
-            self.face_tracking_cap.release()
-        self.face_tracking_label.setText("Camera stopped")
+        if hasattr(self, "face_tracking_cap"):
+            try:
+                self.face_tracking_cap.release()
+            except Exception:
+                pass
+        self.face_tracking_label.setText("Camera arretee")
+        if hasattr(self, "ft_status_label"):
+            self.ft_status_label.setText("Camera arretee — aucune commande servo envoyee.")
 
     def face_tracking_tick(self):
-        if not hasattr(self, 'face_tracking_cap') or not self.face_tracking_cap.isOpened():
+        if not hasattr(self, "face_tracking_cap") or not self.face_tracking_cap.isOpened():
             self.stop_face_tracking_camera()
             return
+
         ret, frame = self.face_tracking_cap.read()
-        if not ret:
-            self.face_tracking_label.setText("No frame")
+        if not ret or frame is None:
+            self.face_tracking_label.setText("Pas de signal camera")
             return
-        # Détection visage + crosshair
+
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self.face_cascade.detectMultiScale(gray, 1.2, 5)
+        # Detecter les visages (scaleFactor=1.1, minNeighbors=5 pour reduire les faux positifs)
+        faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
         h, w, _ = frame.shape
-        # Dessiner crosshair au centre du visage détecté (ou au centre si rien)
+
+        # --- Centre de reference fixe (la croix jaune) ---
+        frame_cx = w // 2
+        frame_cy = h // 2
+
+        ft_connected = (self.ft_ser is not None and getattr(self.ft_ser, "is_open", False))
+
         if len(faces) > 0:
-            (x, y, fw, fh) = faces[0]
-            cx = x + fw // 2
-            cy = y + fh // 2
+            # Prendre le plus grand visage detecte
+            fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+            face_cx = fx + fw // 2
+            face_cy = fy + fh // 2
+
+            # --- Calcul de l'erreur (face vs centre image) ---
+            error_x = face_cx - frame_cx   # positif = visage a droite du centre
+            error_y = face_cy - frame_cy   # positif = visage en bas du centre
+
+            # --- Calcul des angles cibles avec deadzone ---
+            if abs(error_x) < SERVO_DEAD_ZONE_PX:
+                # Dans la deadzone: ne pas bouger
+                desired_x = self.current_servo_angle_x
+            else:
+                # Proportion de l'erreur dans le demi-ecran → angle
+                desired_x = 90 + (error_x / frame_cx) * 90 * SERVO_SENSITIVITY_X * SERVO_X_INVERT
+
+            if abs(error_y) < SERVO_DEAD_ZONE_PX:
+                desired_y = self.current_servo_angle_y
+            else:
+                desired_y = 90 + (error_y / frame_cy) * 90 * SERVO_SENSITIVITY_Y * SERVO_Y_INVERT
+
+            desired_x = self._servo_clamp(desired_x)
+            desired_y = self._servo_clamp(desired_y)
+
+            # --- Mouvement smooth (max SERVO_MAX_STEP_DEG par tick) ---
+            self.current_servo_angle_x = self._servo_move_towards(
+                self.current_servo_angle_x, desired_x, SERVO_MAX_STEP_DEG
+            )
+            self.current_servo_angle_y = self._servo_move_towards(
+                self.current_servo_angle_y, desired_y, SERVO_MAX_STEP_DEG
+            )
+
+            # --- Envoi a l'Arduino (fail silencieux si deconnecte) ---
+            self._ft_send_angles(self.current_servo_angle_x, self.current_servo_angle_y)
+
+            # --- Dessin sur la frame ---
+            # Rectangle vert autour de tous les visages detectes
+            for (x, y, fw2, fh2) in faces:
+                cv2.rectangle(frame, (x, y), (x + fw2, y + fh2), (0, 220, 80), 2)
+
+            # Point rouge au centre du visage selectionne
+            cv2.circle(frame, (face_cx, face_cy), 7, (0, 80, 255), -1)
+            cv2.circle(frame, (face_cx, face_cy), 7, (255, 255, 255), 1)
+
+            # Ligne d'erreur: du centre image au centre visage
+            cv2.line(frame, (frame_cx, frame_cy), (face_cx, face_cy), (255, 120, 0), 1)
+
+            # Texte d'info en bas de frame
+            motor_txt = (
+                f"Servo X={self.current_servo_angle_x}deg  Y={self.current_servo_angle_y}deg"
+                if ft_connected else "Moteurs: Arduino deconnecte"
+            )
+            cv2.putText(frame, motor_txt, (10, h - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.52, (220, 220, 220), 1, cv2.LINE_AA)
+            cv2.putText(frame, f"Err X:{error_x:+d}px  Y:{error_y:+d}px  DZ:{SERVO_DEAD_ZONE_PX}px",
+                        (10, h - 35), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (120, 210, 255), 1, cv2.LINE_AA)
+
+            # Mise a jour labels Qt
+            if hasattr(self, "ft_angle_x_label"):
+                self.ft_angle_x_label.setText(f"Servo X: {self.current_servo_angle_x}deg")
+                self.ft_angle_y_label.setText(f"Servo Y: {self.current_servo_angle_y}deg")
+            if hasattr(self, "ft_status_label"):
+                m = f"Servo X={self.current_servo_angle_x}deg Y={self.current_servo_angle_y}deg" if ft_connected else "Arduino deconnecte"
+                self.ft_status_label.setText(
+                    f"Visage detecte | Erreur X:{error_x:+d}px Y:{error_y:+d}px | {m}"
+                )
         else:
-            cx = w // 2
-            cy = h // 2
+            # Aucun visage detecte
+            if hasattr(self, "ft_status_label"):
+                m = f"Servo X={self.current_servo_angle_x}deg Y={self.current_servo_angle_y}deg" if ft_connected else "Arduino deconnecte"
+                self.ft_status_label.setText(f"Aucun visage detecte | {m}")
 
-        frame_center_x = w // 2
-        frame_center_y = h // 2
-        error_x = cx - frame_center_x
-        error_y = cy - frame_center_y
+        # --- Croix jaune fixe au centre (reference = cible) ---
+        cs = 24  # longueur du bras de la croix
+        cv2.line(frame, (frame_cx - cs, frame_cy), (frame_cx + cs, frame_cy), (0, 220, 220), 2)
+        cv2.line(frame, (frame_cx, frame_cy - cs), (frame_cx, frame_cy + cs), (0, 220, 220), 2)
+        cv2.circle(frame, (frame_cx, frame_cy), 4, (0, 220, 220), -1)
 
-        if abs(error_x) < SERVO_DEAD_ZONE_PX:
-            desired_angle_x = self.current_servo_angle_x
+        # --- Affichage miroir dans le QLabel (camera inversée horizontalement) ---
+        frame_display = cv2.flip(frame, 1)
+        rgb = cv2.cvtColor(frame_display, cv2.COLOR_BGR2RGB)
+        qimg = QImage(rgb.data, rgb.shape[1], rgb.shape[0],
+                      rgb.shape[1] * 3, QImage.Format.Format_RGB888).copy()
+        self.face_tracking_label.setPixmap(QPixmap.fromImage(qimg))
+
+    # ---------- FACE TRACKER SERIAL ----------
+    # Port par defaut du Face Tracker Arduino — modifier ici si besoin
+    FT_DEFAULT_PORT = "COM6"
+
+    def _ft_refresh_ports(self):
+        """Rafraichir la liste des ports COM dans le panneau Face Tracking."""
+        if not hasattr(self, "ft_port_combo"):
+            return
+        self.ft_port_combo.clear()
+        ports = list_com_ports()
+        if not ports:
+            self.ft_port_combo.addItem("Aucun port", "")
+            return
+        default_idx = 0
+        for i, (dev, desc) in enumerate(ports):
+            self.ft_port_combo.addItem(f"{dev} - {desc}", dev)
+            if dev.upper() == self.FT_DEFAULT_PORT.upper():
+                default_idx = i
+        self.ft_port_combo.setCurrentIndex(default_idx)
+
+    def _ft_toggle_connect(self):
+        if self.ft_ser is None:
+            self._ft_connect_serial()
         else:
-            desired_angle_x = 90 + (error_x / frame_center_x) * 90 * SERVO_SENSITIVITY_X * SERVO_X_INVERT
-        if abs(error_y) < SERVO_DEAD_ZONE_PX:
-            desired_angle_y = self.current_servo_angle_y
+            self._ft_disconnect_serial()
+
+    def _ft_connect_serial(self):
+        """Connecter le port serie dedie au Face Tracker Arduino."""
+        if not hasattr(self, "ft_port_combo"):
+            return
+        port = self.ft_port_combo.currentData()
+        if not port:
+            if hasattr(self, "ft_status_label"):
+                self.ft_status_label.setText("Aucun port selectionne.")
+            return
+        # Si le port est deja connecte dans la barre principale, reutiliser cette liaison.
+        if (
+            self.ser is not None
+            and getattr(self.ser, "is_open", False)
+            and getattr(self.ser, "port", None) == port
+        ):
+            self.ft_ser = self.ser
+            self.ft_shared_with_main = True
+            self.ft_btn_connect.setText("Deconnecter Arduino")
+            self.ft_pill.setText("Arduino connecte")
+            self.ft_pill.setObjectName("PillGreen")
+            self.ft_pill.style().unpolish(self.ft_pill)
+            self.ft_pill.style().polish(self.ft_pill)
+            if hasattr(self, "ft_status_label"):
+                self.ft_status_label.setText(
+                    f"Arduino connecte via la liaison principale ({port})."
+                )
+            self._ft_send_angles(SERVO_INITIAL_ANGLE, SERVO_INITIAL_ANGLE, force=True)
+            self.statusBar().showMessage(f"Face Tracker Arduino connecte (liaison partagee): {port}")
+            return
+        try:
+            self.ft_ser = serial.Serial(port, 115200, timeout=0.05)
+            self.ft_shared_with_main = False
+            # Laisser l'Arduino resetter apres ouverture DTR
+            time.sleep(0.1)
+            self.ft_btn_connect.setText("Deconnecter Arduino")
+            self.ft_pill.setText("Arduino connecte")
+            self.ft_pill.setObjectName("PillGreen")
+            self.ft_pill.style().unpolish(self.ft_pill)
+            self.ft_pill.style().polish(self.ft_pill)
+            if hasattr(self, "ft_status_label"):
+                self.ft_status_label.setText(f"Arduino connecte sur {port} @ 115200 baud.")
+            # Centrer les servos immediatement
+            self._ft_send_angles(SERVO_INITIAL_ANGLE, SERVO_INITIAL_ANGLE, force=True)
+            self.statusBar().showMessage(f"Face Tracker Arduino connecte: {port}")
+        except PermissionError:
+            self.ft_ser = None
+            if hasattr(self, "ft_status_label"):
+                self.ft_status_label.setText("Port occupe — fermer l'autre programme qui l'utilise.")
+            QMessageBox.warning(
+                self,
+                "Serial",
+                f"Impossible d'ouvrir {port}.\n"
+                "Le port est deja utilise (Arduino Serial Monitor, autre app Python, etc.)."
+            )
+        except serial.SerialException as e:
+            self.ft_ser = None
+            msg = str(e)
+            if ("Access is denied" in msg) or ("PermissionError" in msg):
+                friendly = (
+                    f"Impossible d'ouvrir {port}.\n"
+                    "Le port est deja utilise (Arduino IDE/Monitor, autre app, ou autre instance)."
+                )
+            else:
+                friendly = f"Erreur serial sur {port}: {msg}"
+            if hasattr(self, "ft_status_label"):
+                self.ft_status_label.setText(friendly.replace("\n", " "))
+            QMessageBox.warning(self, "Serial", friendly)
+        except Exception as e:
+            self.ft_ser = None
+            if hasattr(self, "ft_status_label"):
+                self.ft_status_label.setText(f"Erreur connexion: {e}")
+
+    def _ft_disconnect_serial(self):
+        """Deconnecter le Face Tracker Arduino."""
+        # En mode partage, ne pas fermer self.ser ici.
+        if self.ft_shared_with_main:
+            self.ft_ser = None
+            self.ft_shared_with_main = False
         else:
-            desired_angle_y = 90 + (error_y / frame_center_y) * 90 * SERVO_SENSITIVITY_Y * SERVO_Y_INVERT
+            try:
+                if self.ft_ser and self.ft_ser.is_open:
+                    self.ft_ser.close()
+            except Exception:
+                pass
+            self.ft_ser = None
+        self.ft_ser = None
+        if hasattr(self, "ft_btn_connect"):
+            self.ft_btn_connect.setText("Connecter Arduino")
+        if hasattr(self, "ft_pill"):
+            self.ft_pill.setText("Arduino deconnecte")
+            self.ft_pill.setObjectName("PillRed")
+            self.ft_pill.style().unpolish(self.ft_pill)
+            self.ft_pill.style().polish(self.ft_pill)
+        if hasattr(self, "ft_status_label"):
+            self.ft_status_label.setText("Arduino deconnecte — mode camera seul (sans moteurs).")
 
-        desired_angle_x = self._servo_clamp(desired_angle_x)
-        desired_angle_y = self._servo_clamp(desired_angle_y)
-
-        self.current_servo_angle_x = self._servo_move_towards(self.current_servo_angle_x, desired_angle_x, SERVO_MAX_STEP_DEG)
-        self.current_servo_angle_y = self._servo_move_towards(self.current_servo_angle_y, desired_angle_y, SERVO_MAX_STEP_DEG)
-        self._servo_send_angles(self.current_servo_angle_x, self.current_servo_angle_y)
-
-        # Dessiner crosshair
-        color = (0, 0, 255) if len(faces) > 0 else (100, 100, 100)
-        cv2.drawMarker(frame, (cx, cy), color, markerType=cv2.MARKER_CROSS, markerSize=40, thickness=2)
-        # Dessiner axes X et Y
-        cv2.line(frame, (cx, 0), (cx, h), (0, 255, 255), 1)  # Axe Y (vertical)
-        cv2.line(frame, (0, cy), (w, cy), (0, 255, 255), 1)  # Axe X (horizontal)
-        # Optionnel: dessiner rectangle visage
-        for (x, y, fw, fh) in faces:
-            cv2.rectangle(frame, (x, y), (x+fw, y+fh), (0,255,0), 2)
-        # Affichage
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb.shape
-        bytes_per_line = ch * w
-        qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
-        pix = QPixmap.fromImage(qimg)
-        self.face_tracking_label.setPixmap(pix)
+    def _ft_send_angles(self, angle_x: int, angle_y: int, force: bool = False):
+        """Envoyer les angles au Face Tracker Arduino via son port serie dedie."""
+        if self.ft_ser is None or not getattr(self.ft_ser, "is_open", False):
+            return
+        if not force:
+            dx = abs(angle_x - self.last_servo_angle_x)
+            dy = abs(angle_y - self.last_servo_angle_y)
+            if dx < SERVO_SERIAL_SEND_THRESHOLD and dy < SERVO_SERIAL_SEND_THRESHOLD:
+                return
+        payload = f"{angle_x},{angle_y}\n"
+        try:
+            self.ft_ser.write(payload.encode("ascii"))
+            self.last_servo_angle_x = angle_x
+            self.last_servo_angle_y = angle_y
+        except Exception:
+            # Deconnexion silencieuse — on ne crash pas
+            pass
 
     def goto_face_tracking(self):
         self.pages.setCurrentIndex(2)
+        self._ft_refresh_ports()
         self.lbl_title.setText("Face Tracking")
-        self.lbl_sub.setText("Détection visage + crosshair (OpenCV)")
+        self.lbl_sub.setText("Suivi visage → servos X/Y  |  croix jaune = centre cible")
         self._set_nav_checked("btn_face_tracking")
 
     # ---------- TOPBAR ----------
@@ -2033,6 +2287,18 @@ class MainWindow(QMainWindow):
         if not port:
             QMessageBox.warning(self, "Port", "Select a COM port.")
             return
+        if (
+            self.ft_ser is not None
+            and getattr(self.ft_ser, "is_open", False)
+            and getattr(self.ft_ser, "port", None) == port
+        ):
+            QMessageBox.warning(
+                self,
+                "Serial",
+                f"{port} est deja utilise par Face Tracking.\n"
+                "Deconnecte Face Tracking ou choisis un autre port."
+            )
+            return
         try:
             self.ser = serial.Serial(port, self.cfg.baud, timeout=self.cfg.serial_timeout_sec)
             try:
@@ -2045,10 +2311,24 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Connected to {port} @ {self.cfg.baud}")
         except PermissionError:
             QMessageBox.critical(self, "Serial", "Port busy. Close Serial Monitor / other scripts.")
+        except serial.SerialException as e:
+            msg = str(e)
+            if ("Access is denied" in msg) or ("PermissionError" in msg):
+                QMessageBox.critical(
+                    self,
+                    "Serial",
+                    f"Impossible d'ouvrir {port}.\n"
+                    "Le port est deja utilise (Arduino IDE/Monitor, autre app, ou autre instance)."
+                )
+            else:
+                QMessageBox.critical(self, "Serial", f"Erreur serial: {msg}")
         except Exception as e:
             QMessageBox.critical(self, "Serial", str(e))
 
     def disconnect_serial(self):
+        if self.ft_shared_with_main:
+            # Reinitialiser d'abord l'etat Face Tracking partage.
+            self._ft_disconnect_serial()
         try:
             if self.ser:
                 self.ser.close()
@@ -2685,6 +2965,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.close_camera()
         self.stop_image3d_camera()
+        self.stop_face_tracking_camera()
+        self._ft_disconnect_serial()
         self.disconnect_serial()
         event.accept()
 
