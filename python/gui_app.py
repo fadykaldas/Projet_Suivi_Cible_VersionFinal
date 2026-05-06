@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFrame, QMessageBox, QStackedWidget,
     QCheckBox, QSlider, QSpinBox, QDoubleSpinBox, QFileDialog,
     QLineEdit, QCompleter,
-    QGridLayout
+    QGridLayout, QScrollArea, QSizePolicy
 )
 
 from image_3d import Image3DConfig, SingleCameraChessboardMeasurer
@@ -113,6 +113,19 @@ def apply_pro_theme(app: QApplication):
     * { font-family: Segoe UI; font-size: 13px; }
     QMainWindow { background: #0b0f17; }
 
+    QMenuBar {
+        background: #0b1220;
+        color: #cbd5e1;
+        border-bottom: 1px solid #1f2a44;
+    }
+    QMenuBar::item:selected { background: #172554; }
+    QMenu {
+        background: #0b1220;
+        color: #e5e7eb;
+        border: 1px solid #24324f;
+    }
+    QMenu::item:selected { background: #1d4ed8; }
+
     QFrame#TopBar {
         background: #0b1220;
         border-bottom: 1px solid #1f2a44;
@@ -156,6 +169,32 @@ def apply_pro_theme(app: QApplication):
         border: 1px solid #1f2a44;
         border-radius: 18px;
     }
+    QFrame#HomeHero {
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #0b1a3d, stop:1 #102554);
+        border: 1px solid #27406f;
+        border-radius: 18px;
+    }
+    QLabel#HomeHeroTitle {
+        color: #f8fafc;
+        font-size: 22px;
+        font-weight: 800;
+    }
+    QLabel#HomeHeroLead {
+        color: #dbeafe;
+        font-size: 14px;
+        font-weight: 600;
+    }
+    QLabel#HomeHeroHint {
+        color: #bfdbfe;
+    }
+    QLabel#HomeKpi {
+        padding: 6px 12px;
+        border-radius: 999px;
+        border: 1px solid #2b4a7c;
+        background: rgba(15, 23, 42, 0.45);
+        color: #dbeafe;
+        font-weight: 700;
+    }
     QLabel#CardTitle {
         color: #e5e7eb;
         font-size: 14px;
@@ -163,7 +202,7 @@ def apply_pro_theme(app: QApplication):
     }
     QLabel { color: #cbd5e1; }
 
-    QComboBox, QSpinBox, QDoubleSpinBox {
+    QComboBox, QSpinBox, QDoubleSpinBox, QLineEdit {
         background: #0b1220;
         border: 1px solid #24324f;
         padding: 6px 10px;
@@ -274,7 +313,7 @@ class RadarWidget(QWidget):
     def __init__(self, cfg: AppConfig):
         super().__init__()
         self.cfg = cfg
-        self.setMinimumSize(520, 380)
+        self.setMinimumSize(380, 260)
 
         self.last_angle = 90.0
         self.last_distance = None
@@ -480,17 +519,12 @@ def card(title: str, body: QWidget) -> QFrame:
 
 # -------------------- MAIN WINDOW --------------------
 class MainWindow(QMainWindow):
-    def goto_measure(self):
-        self.pages.setCurrentIndex(3)
-        self.lbl_title.setText("Mesure d'objet")
-        self.lbl_sub.setText("Mesure avancée : calibration, contours, surface")
-        self._set_nav_checked("btn_measure")
     def __init__(self):
         super().__init__()
         self.cfg = AppConfig.load()
 
         self.setWindowTitle("Projet Suivi Cible")
-        self.resize(1400, 900)
+        self._apply_responsive_window_bounds()
 
         # runtime state
         self.ser = None
@@ -523,7 +557,7 @@ class MainWindow(QMainWindow):
         self.yolo = None
         if YOLO is not None:
             try:
-                model_path = Path(__file__).resolve().parents[2] / "yolov8n.pt"
+                model_path = Path(__file__).resolve().parents[1] / "yolov8n.pt"
                 if model_path.exists():
                     self.yolo = YOLO(str(model_path))
                 else:
@@ -711,14 +745,14 @@ class MainWindow(QMainWindow):
 
         lay.addSpacing(8)
 
-        self.btn_home = self._nav_button("  🏠  Home", self.goto_home)
-        self.btn_live = self._nav_button("  📡  Live", self.goto_live)
-        self.btn_face_tracking = self._nav_button("  🎯  Face Tracking", self.goto_face_tracking)
-        self.btn_measure = self._nav_button("  📏  Mesure d'objet", self.goto_measure)
-        self.btn_image_3d = self._nav_button("  🧊  Image 3D", self.goto_image_3d)
-        self.btn_object_detection = self._nav_button("  🔎  Object Detection", self.goto_object_detection)
-        self.btn_settings = self._nav_button("  ⚙️  Settings", self.goto_settings)
-        self.btn_about = self._nav_button("  ℹ️  About", self.goto_about)
+        self.btn_home = self._nav_button("Home", self.goto_home)
+        self.btn_live = self._nav_button("Live", self.goto_live)
+        self.btn_face_tracking = self._nav_button("Face Tracking", self.goto_face_tracking)
+        self.btn_measure = self._nav_button("Mesure d'objet", self.goto_measure)
+        self.btn_image_3d = self._nav_button("Image 3D", self.goto_image_3d)
+        self.btn_object_detection = self._nav_button("Object Detection", self.goto_object_detection)
+        self.btn_settings = self._nav_button("Settings", self.goto_settings)
+        self.btn_about = self._nav_button("About", self.goto_about)
 
         lay.addWidget(self.btn_home)
         lay.addWidget(self.btn_live)
@@ -761,17 +795,59 @@ class MainWindow(QMainWindow):
         if not reload_saved:
             self.image3d_backend.reset_calibration_samples()
 
+    def _apply_responsive_window_bounds(self):
+        """Clamp initial window size to available screen space."""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is None:
+            self.resize(1200, 760)
+            self.setMinimumSize(900, 560)
+            return
+
+        available = screen.availableGeometry()
+        target_w = min(1400, int(available.width() * 0.94))
+        target_h = min(900, int(available.height() * 0.92))
+
+        self.setMinimumSize(900, 560)
+        self.resize(max(900, target_w), max(560, target_h))
+
+    def _make_scrollable_page(self, content: QWidget) -> QWidget:
+        """Wrap large pages in a scroll area so they always fit smaller screens."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setWidget(content)
+        return scroll
+
+    def _create_video_label(self, text: str = "Camera stopped", min_size=(360, 240)) -> QLabel:
+        """Build a consistently styled video preview label used across pages."""
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setStyleSheet("background:#0b1220; border-radius:14px; color:#e5e7eb;")
+        label.setMinimumSize(*min_size)
+        label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        label.setScaledContents(True)
+        return label
+
+    @staticmethod
+    def _normalize_object_label(value: str) -> str:
+        cleaned = value.strip().lower().replace("_", " ").replace("-", " ")
+        return re.sub(r"\s+", " ", cleaned)
+
+    def _is_target_object(self, label: str, target: str) -> bool:
+        """Allow friendly matching (phone ~= cell phone) instead of strict equality only."""
+        l = self._normalize_object_label(label)
+        t = self._normalize_object_label(target)
+        return bool(t) and (l == t or l in t or t in l)
+
     def _build_measure_page(self) -> QWidget:
         page = QWidget()
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
 
-        self.measure_label = QLabel("Camera stopped")
-        self.measure_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.measure_label.setStyleSheet("background:#0b1220; border-radius:14px; color:#e5e7eb;")
-        self.measure_label.setMinimumSize(520, 380)
-        self.measure_label.setScaledContents(True)
+        self.measure_label = self._create_video_label("Camera stopped")
 
         self.btn_measure_start = QPushButton("Start Mesure d'objet")
         self.btn_measure_start.setObjectName("SecondaryBtn")
@@ -836,11 +912,7 @@ class MainWindow(QMainWindow):
         views = QHBoxLayout()
         views.setSpacing(12)
 
-        self.image3d_label = QLabel("Image 3D stopped")
-        self.image3d_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.image3d_label.setStyleSheet("background:#0b1220; border-radius:14px; color:#e5e7eb;")
-        self.image3d_label.setMinimumSize(640, 420)
-        self.image3d_label.setScaledContents(True)
+        self.image3d_label = self._create_video_label("Image 3D stopped", min_size=(420, 280))
 
         debug_panel = QWidget()
         debug_lay = QVBoxLayout(debug_panel)
@@ -850,13 +922,13 @@ class MainWindow(QMainWindow):
         self.image3d_debug_threshold = QLabel("Debug threshold")
         self.image3d_debug_threshold.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image3d_debug_threshold.setStyleSheet("background:#0b1220; border-radius:14px; color:#64748b;")
-        self.image3d_debug_threshold.setMinimumSize(280, 200)
+        self.image3d_debug_threshold.setMinimumSize(220, 150)
         self.image3d_debug_threshold.setScaledContents(True)
 
         self.image3d_debug_combined = QLabel("Debug combined")
         self.image3d_debug_combined.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image3d_debug_combined.setStyleSheet("background:#0b1220; border-radius:14px; color:#64748b;")
-        self.image3d_debug_combined.setMinimumSize(280, 200)
+        self.image3d_debug_combined.setMinimumSize(220, 150)
         self.image3d_debug_combined.setScaledContents(True)
 
         debug_lay.addWidget(card("Debug Threshold", self.image3d_debug_threshold), 1)
@@ -875,7 +947,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(controls)
         lay.addLayout(views, 1)
         lay.addWidget(help_text)
-        return page
+        return self._make_scrollable_page(page)
 
     def goto_measure(self):
         self.pages.setCurrentIndex(3)
@@ -1062,11 +1134,7 @@ class MainWindow(QMainWindow):
         top_lay.addWidget(self.btn_object_apply)
         top_lay.addWidget(self.btn_object_start)
 
-        self.object_detection_label = QLabel("Object detection stopped")
-        self.object_detection_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.object_detection_label.setStyleSheet("background:#0b1220; border-radius:14px; color:#e5e7eb;")
-        self.object_detection_label.setMinimumSize(520, 380)
-        self.object_detection_label.setScaledContents(True)
+        self.object_detection_label = self._create_video_label("Object detection stopped")
 
         self.object_detection_status = QLabel(f"Watching for: {self.target_object}")
         self.object_detection_status.setStyleSheet("color:#94a3b8;")
@@ -1155,7 +1223,7 @@ class MainWindow(QMainWindow):
         for box in detections.boxes:
             class_id = int(box.cls[0])
             label = str(self.yolo.names[class_id]).lower()
-            if label == self.target_object:
+            if self._is_target_object(label, self.target_object):
                 detected = True
                 break
 
@@ -1304,11 +1372,7 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(12)
 
-        self.face_tracking_label = QLabel("Camera stopped")
-        self.face_tracking_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.face_tracking_label.setStyleSheet("background:#0b1220; border-radius:14px; color:#e5e7eb;")
-        self.face_tracking_label.setMinimumSize(520, 380)
-        self.face_tracking_label.setScaledContents(True)
+        self.face_tracking_label = self._create_video_label("Camera stopped")
 
         self.btn_face_tracking_start = QPushButton("Start Face Tracking")
         self.btn_face_tracking_start.setObjectName("SecondaryBtn")
@@ -1479,31 +1543,46 @@ class MainWindow(QMainWindow):
         lay.setSpacing(12)
 
         hero = QFrame()
-        hero.setObjectName("Card")
+        hero.setObjectName("HomeHero")
         h = QVBoxLayout(hero)
         h.setContentsMargins(18, 18, 18, 18)
-        h.setSpacing(10)
+        h.setSpacing(12)
 
-        t = QLabel("Bienvenue 👋")
-        t.setObjectName("CardTitle")
+        t = QLabel("Centre de controle")
+        t.setObjectName("HomeHeroTitle")
         h.addWidget(t)
 
+        lead = QLabel("Pilote ton systeme complet depuis un seul tableau de bord.")
+        lead.setObjectName("HomeHeroLead")
+        h.addWidget(lead)
+
         msg = QLabel(
-            "Pilote rapidement les modules principaux depuis Home.\n"
-            "• Navigation directe vers chaque fonctionnalite\n"
-            "• Actions systeme (serie, camera, capture, configuration)\n"
-            "• Etat temps reel radar/camera et derniers screenshots"
+            "Navigation directe, actions instantanees, et etat radar/camera en temps reel."
         )
-        msg.setStyleSheet("color:#94a3b8;")
+        msg.setObjectName("HomeHeroHint")
         msg.setWordWrap(True)
         h.addWidget(msg)
 
+        hero_kpis = QHBoxLayout()
+        hero_kpis.setSpacing(8)
+        self.home_kpi_serial = QLabel("Serial: --")
+        self.home_kpi_serial.setObjectName("HomeKpi")
+        self.home_kpi_camera = QLabel("Camera: --")
+        self.home_kpi_camera.setObjectName("HomeKpi")
+        self.home_kpi_target = QLabel("Target: --")
+        self.home_kpi_target.setObjectName("HomeKpi")
+        hero_kpis.addWidget(self.home_kpi_serial)
+        hero_kpis.addWidget(self.home_kpi_camera)
+        hero_kpis.addWidget(self.home_kpi_target)
+        hero_kpis.addStretch()
+        h.addLayout(hero_kpis)
+
         btn_row = QHBoxLayout()
-        b1 = QPushButton("Open Live")
+        b1 = QPushButton("Ouvrir Live")
         b1.clicked.connect(self.goto_live)
-        b2 = QPushButton("Open Object Detection")
+        b2 = QPushButton("Detection Objet")
         b2.clicked.connect(self.goto_object_detection)
-        b3 = QPushButton("Open Settings")
+        b3 = QPushButton("Parametres")
         b3.setObjectName("SecondaryBtn")
         b3.clicked.connect(self.goto_settings)
         btn_row.addWidget(b1)
@@ -1519,6 +1598,10 @@ class MainWindow(QMainWindow):
         qn.setHorizontalSpacing(10)
         qn.setVerticalSpacing(10)
 
+        qn_title = QLabel("Navigation rapide")
+        qn_title.setObjectName("CardTitle")
+        qn.addWidget(qn_title, 0, 0, 1, 3)
+
         nav_buttons = [
             ("Live", self.goto_live),
             ("Face Tracking", self.goto_face_tracking),
@@ -1531,7 +1614,7 @@ class MainWindow(QMainWindow):
             btn = QPushButton(label)
             btn.setObjectName("SecondaryBtn")
             btn.clicked.connect(callback)
-            qn.addWidget(btn, idx // 3, idx % 3)
+            qn.addWidget(btn, 1 + (idx // 3), idx % 3)
 
         system = QFrame()
         system.setObjectName("Card")
@@ -1542,6 +1625,11 @@ class MainWindow(QMainWindow):
         system_title = QLabel("Actions rapides")
         system_title.setObjectName("CardTitle")
         sys_lay.addWidget(system_title)
+
+        system_hint = QLabel("Controle directement les actions frequentes sans changer de page.")
+        system_hint.setStyleSheet("color:#94a3b8;")
+        system_hint.setWordWrap(True)
+        sys_lay.addWidget(system_hint)
 
         sys_row1 = QHBoxLayout()
         self.home_btn_connect = QPushButton("Connect serial")
@@ -1589,6 +1677,13 @@ class MainWindow(QMainWindow):
         status_title.setObjectName("CardTitle")
         st.addWidget(status_title, 0, 0, 1, 2)
 
+        self.home_badge_state = QLabel("Radar: --")
+        self.home_badge_state.setObjectName("HomeKpi")
+        self.home_badge_distance = QLabel("Distance: --")
+        self.home_badge_distance.setObjectName("HomeKpi")
+        st.addWidget(self.home_badge_state, 1, 0)
+        st.addWidget(self.home_badge_distance, 1, 1)
+
         self.home_stat_serial = QLabel("Serial: --")
         self.home_stat_camera = QLabel("Camera: --")
         self.home_stat_radar = QLabel("Radar state: --")
@@ -1610,7 +1705,7 @@ class MainWindow(QMainWindow):
         ]
         for i, lbl in enumerate(stats):
             lbl.setStyleSheet("color:#cbd5e1;")
-            st.addWidget(lbl, 1 + (i // 2), i % 2)
+            st.addWidget(lbl, 2 + (i // 2), i % 2)
 
         recent = QFrame()
         recent.setObjectName("Card")
@@ -1621,6 +1716,10 @@ class MainWindow(QMainWindow):
         rt = QLabel("Derniers screenshots")
         rt.setObjectName("CardTitle")
         rc.addWidget(rt)
+
+        rt_sub = QLabel("Les trois captures les plus recentes")
+        rt_sub.setStyleSheet("color:#94a3b8;")
+        rc.addWidget(rt_sub)
 
         self.home_shot_1 = QLabel("Aucun screenshot")
         self.home_shot_2 = QLabel("-")
@@ -1644,7 +1743,7 @@ class MainWindow(QMainWindow):
         lay.addLayout(row)
         lay.addLayout(bottom)
         lay.addStretch()
-        return page
+        return self._make_scrollable_page(page)
 
     def _refresh_home_dashboard(self):
         if not hasattr(self, "home_stat_serial"):
@@ -1665,6 +1764,21 @@ class MainWindow(QMainWindow):
         self.home_stat_auto.setText(f"Auto camera: {'ON' if auto_mode else 'OFF'}")
         self.home_stat_detect.setText(f"OpenCV detect: {'ON' if detect_mode else 'OFF'}")
         self.home_stat_target.setText(f"Target: {self.target_object}")
+
+        if hasattr(self, "home_kpi_serial"):
+            self.home_kpi_serial.setText(f"Serial: {'Connected' if serial_ok else 'Disconnected'}")
+        if hasattr(self, "home_kpi_camera"):
+            self.home_kpi_camera.setText(f"Camera: {'Running' if cam_ok else 'Stopped'}")
+        if hasattr(self, "home_kpi_target"):
+            self.home_kpi_target.setText(f"Target: {self.target_object}")
+
+        if hasattr(self, "home_badge_state"):
+            self.home_badge_state.setText(f"Radar: {str(self.state).upper()}")
+        if hasattr(self, "home_badge_distance"):
+            if self.last_distance is None:
+                self.home_badge_distance.setText("Distance: N/A")
+            else:
+                self.home_badge_distance.setText(f"Distance: {self.last_distance:.1f} cm")
 
         if hasattr(self, "home_btn_connect"):
             self.home_btn_connect.setText("Disconnect serial" if serial_ok else "Connect serial")
@@ -1703,11 +1817,7 @@ class MainWindow(QMainWindow):
 
         self.radar_widget = RadarWidget(self.cfg)
 
-        self.cam_label = QLabel("Camera stopped")
-        self.cam_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.cam_label.setStyleSheet("background:#0b1220; border-radius:14px; color:#e5e7eb;")
-        self.cam_label.setMinimumSize(520, 380)
-        self.cam_label.setScaledContents(True)
+        self.cam_label = self._create_video_label("Camera stopped")
 
         lay.addWidget(card("Radar", self.radar_widget), 1)
         lay.addWidget(card("Camera", self.cam_label), 1)
@@ -1847,7 +1957,7 @@ class MainWindow(QMainWindow):
 
         outer.addLayout(row2)
         outer.addStretch()
-        return page
+        return self._make_scrollable_page(page)
 
     def _build_about_page(self) -> QWidget:
         page = QWidget()
