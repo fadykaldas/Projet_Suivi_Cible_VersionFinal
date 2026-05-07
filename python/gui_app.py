@@ -1590,7 +1590,7 @@ class MainWindow(QMainWindow):
 
     # ---------- FACE TRACKER SERIAL ----------
     # Port par defaut du Face Tracker Arduino — modifier ici si besoin
-    FT_DEFAULT_PORT = "COM6"
+    FT_DEFAULT_PORT = "COM3"
 
     def _ft_refresh_ports(self):
         """Rafraichir la liste des ports COM dans le panneau Face Tracking."""
@@ -1647,7 +1647,11 @@ class MainWindow(QMainWindow):
             self.ft_ser = serial.Serial(port, 115200, timeout=0.05)
             self.ft_shared_with_main = False
             # Laisser l'Arduino resetter apres ouverture DTR
-            time.sleep(0.1)
+            time.sleep(0.5)
+            try:
+                self.ft_ser.reset_input_buffer()
+            except Exception:
+                pass
             self.ft_btn_connect.setText("Deconnecter Arduino")
             self.ft_pill.setText("Arduino connecte")
             self.ft_pill.setObjectName("PillGreen")
