@@ -1516,8 +1516,8 @@ class MainWindow(QMainWindow):
                 # Dans la deadzone: ne pas bouger
                 desired_x = self.current_servo_angle_x
             else:
-                # Proportion de l'erreur dans le demi-ecran → angle
-                desired_x = 90 + (error_x / frame_cx) * 90 * SERVO_SENSITIVITY_X * SERVO_X_INVERT
+                # Proportion de l'erreur dans le demi-ecran → angle (inversé)
+                desired_x = 90 + (-error_x / frame_cx) * 90 * SERVO_SENSITIVITY_X * SERVO_X_INVERT
 
             if abs(error_y) < SERVO_DEAD_ZONE_PX:
                 desired_y = self.current_servo_angle_y
@@ -1542,13 +1542,6 @@ class MainWindow(QMainWindow):
             # Rectangle vert autour de tous les visages detectes
             for (x, y, fw2, fh2) in faces:
                 cv2.rectangle(frame, (x, y), (x + fw2, y + fh2), (0, 220, 80), 2)
-
-            # Point rouge au centre du visage selectionne
-            cv2.circle(frame, (face_cx, face_cy), 7, (0, 80, 255), -1)
-            cv2.circle(frame, (face_cx, face_cy), 7, (255, 255, 255), 1)
-
-            # Ligne d'erreur: du centre image au centre visage
-            cv2.line(frame, (frame_cx, frame_cy), (face_cx, face_cy), (255, 120, 0), 1)
 
             # Texte d'info en bas de frame
             motor_txt = (
@@ -1575,11 +1568,16 @@ class MainWindow(QMainWindow):
                 m = f"Servo X={self.current_servo_angle_x}deg Y={self.current_servo_angle_y}deg" if ft_connected else "Arduino deconnecte"
                 self.ft_status_label.setText(f"Aucun visage detecte | {m}")
 
-        # --- Croix jaune fixe au centre (reference = cible) ---
-        cs = 24  # longueur du bras de la croix
-        cv2.line(frame, (frame_cx - cs, frame_cy), (frame_cx + cs, frame_cy), (0, 220, 220), 2)
-        cv2.line(frame, (frame_cx, frame_cy - cs), (frame_cx, frame_cy + cs), (0, 220, 220), 2)
-        cv2.circle(frame, (frame_cx, frame_cy), 4, (0, 220, 220), -1)
+        # --- Axes X/Y sur toute la largeur et hauteur de l'image ---
+        if len(faces) > 0:
+            axis_cx, axis_cy = face_cx, face_cy
+        else:
+            axis_cx, axis_cy = frame_cx, frame_cy
+
+        cv2.line(frame, (0, axis_cy), (w - 1, axis_cy), (0, 220, 220), 2)
+        cv2.line(frame, (axis_cx, 0), (axis_cx, h - 1), (0, 220, 220), 2)
+        cv2.putText(frame, "X", (w - 40, axis_cy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 220), 2, cv2.LINE_AA)
+        cv2.putText(frame, "Y", (axis_cx + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 220), 2, cv2.LINE_AA)
 
         # --- Affichage miroir dans le QLabel (camera inversée horizontalement) ---
         frame_display = cv2.flip(frame, 1)
