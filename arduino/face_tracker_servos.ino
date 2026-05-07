@@ -29,8 +29,9 @@
 #define PIN_SERVO_Y  10    // Servo vertical   (haut  / bas)
 
 // --- Parametres ---
-#define STEP_DEG      2    // Pas max par cycle de loop() — toucher pour ajuster la douceur
+#define STEP_DEG      1    // Pas max par cycle de loop() — reduit pour plus de fluidite
 #define LOOP_DELAY_MS 12   // Delai du cycle loop en ms (~83 Hz)
+#define AMPLIFY_FACTOR 2.0 // Facteur d'exageration des mouvements — augmente pour plus d'exageration
 
 // --- Objets servo ---
 Servo servoX;
@@ -70,9 +71,13 @@ void loop() {
       int rx = line.substring(0, commaIdx).toInt();
       int ry = line.substring(commaIdx + 1).toInt();
 
+      // Amplifier les mouvements pour les rendre plus exageres
+      int amplifiedX = 90 + (rx - 90) * AMPLIFY_FACTOR;
+      int amplifiedY = 90 + (ry - 90) * AMPLIFY_FACTOR;
+
       // Contraindre entre 0° et 180° pour proteger les servos
-      targetX = constrain(rx, 0, 180);
-      targetY = constrain(ry, 0, 180);
+      targetX = constrain(amplifiedX, 0, 180);
+      targetY = constrain(amplifiedY, 0, 180);
     }
   }
 
