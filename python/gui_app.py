@@ -2571,49 +2571,36 @@ class MainWindow(QMainWindow):
         - la flèche de direction
         - les points futurs prédits
         """
-        if len(self.target_track) >= 2:
-            pts = [(int(x), int(y)) for x, y, _ in self.target_track]
-            for i in range(1, len(pts)):
-                thickness = max(1, 4 - (len(pts) - i) // 3)
-                cv2.line(frame, pts[i - 1], pts[i], (255, 200, 0), thickness)
+        # Suppression de la traînée de l'historique du mouvement
+        # if len(self.target_track) >= 2:
+        #     pts = [(int(x), int(y)) for x, y, _ in self.target_track]
+        #     for i in range(1, len(pts)):
+        #         thickness = max(1, 4 - (len(pts) - i) // 3)
+        #         cv2.line(frame, pts[i - 1], pts[i], (255, 200, 0), thickness)
 
-        if len(self.target_track) >= 2:
-            x1, y1, _ = self.target_track[-2]
-            x2, y2, _ = self.target_track[-1]
-
-            cv2.arrowedLine(
-                frame,
-                (int(x1), int(y1)),
-                (int(x2), int(y2)),
-                (0, 255, 255),
-                3,
-                tipLength=0.25
-            )
-
-            # Suppression du calcul et de l'affichage de la vitesse
-            # dt = max(self.target_track[-1][2] - self.target_track[-2][2], self.cfg.trajectory_min_dt)
-            # vx = (x2 - x1) / dt
-            # vy = (y2 - y1) / dt
-            # speed = math.sqrt(vx * vx + vy * vy)
-            # cv2.putText(
-            #     frame,
-            #     f"Vitesse: {speed:.1f} px/s",
-            #     (int(x2) + 10, int(y2) + 20),
-            #     cv2.FONT_HERSHEY_SIMPLEX,
-            #     0.6,
-            #     (0, 255, 255),
-            #     2
-            # )
-
-        for i, (xf, yf) in enumerate(self.predicted_points):
-            if 0 <= xf < frame.shape[1] and 0 <= yf < frame.shape[0]:
-                radius = max(2, 6 - i // 2)
-                cv2.circle(frame, (xf, yf), radius, (255, 0, 255), -1)
-
-        if self.last_target_center is not None and self.predicted_points:
-            x0, y0 = self.last_target_center
-            x1, y1 = self.predicted_points[0]
-            cv2.line(frame, (int(x0), int(y0)), (int(x1), int(y1)), (255, 0, 255), 2)
+        # Suppression de la flèche de direction et des points prédits (indicateur de vitesse)
+        # if len(self.target_track) >= 2:
+        #     x1, y1, _ = self.target_track[-2]
+        #     x2, y2, _ = self.target_track[-1]
+        #
+        #     cv2.arrowedLine(
+        #         frame,
+        #         (int(x1), int(y1)),
+        #         (int(x2), int(y2)),
+        #         (0, 255, 255),
+        #         3,
+        #         tipLength=0.25
+        #     )
+        #
+        # for i, (xf, yf) in enumerate(self.predicted_points):
+        #     if 0 <= xf < frame.shape[1] and 0 <= yf < frame.shape[0]:
+        #         radius = max(2, 6 - i // 2)
+        #         cv2.circle(frame, (xf, yf), radius, (255, 0, 255), -1)
+        #
+        # if self.last_target_center is not None and self.predicted_points:
+        #     x0, y0 = self.last_target_center
+        #     x1, y1 = self.predicted_points[0]
+        #     cv2.line(frame, (int(x0), int(y0)), (int(x1), int(y1)), (255, 0, 255), 2)
 
     # ---------- SCREENSHOTS (PRO FEATURE) ----------
     def _timestamp(self):
