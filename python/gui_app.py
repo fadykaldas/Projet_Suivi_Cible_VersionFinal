@@ -61,7 +61,7 @@ class AppConfig:
     auto_camera_from_radar: bool = True
     opencv_detect: bool = True
 
-    target_object: str = "cell phone"
+    target_object: str = "person"
     object_confidence: float = 0.25
 
     trajectory_enabled: bool = True
@@ -1169,7 +1169,7 @@ class MainWindow(QMainWindow):
     def apply_object_detection_target(self):
         target = self.object_search.text().strip().lower()
         if not target:
-            target = "cell phone"
+            target = "person"
             self.object_search.setText(target)
         confidence = float(self.object_confidence_spin.value())
         self.target_object = target
@@ -2784,7 +2784,7 @@ class MainWindow(QMainWindow):
 
             now = time.time()
             detected_obj = False
-            elapsed = 0.0
+            # elapsed sera calculé après, basé sur self.target_start (persistant entre ticks)
 
             if self.cfg.opencv_detect and self.chk_detect.isChecked():
                 self.detector_frame_count += 1
@@ -2805,10 +2805,20 @@ class MainWindow(QMainWindow):
                         if detected_obj:
                             if self.target_start is None:
                                 self.target_start = now
-                            elapsed = now - self.target_start
                         else:
                             self.target_start = None
-                            elapsed = 0.0
+
+            # Considère que la cible est toujours visible si on a une boîte récente
+            # (évite que le timer retombe à zéro pendant les frames sans détection)
+            recent_box = bool(self.last_det_boxes) and (now - self.last_det_ts) <= self.det_box_ttl
+            if recent_box:
+                detected_obj = True
+
+            # Calcul du temps écoulé depuis le début de la détection continue
+            if self.target_start is not None:
+                elapsed = now - self.target_start
+            else:
+                elapsed = 0.0
 
             # Keep recent boxes briefly to avoid flicker.
             if self.last_det_boxes and (now - self.last_det_ts) <= self.det_box_ttl:
