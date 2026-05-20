@@ -1617,6 +1617,11 @@ class MainWindow(QMainWindow):
             self.face_tracking_label.setText("Pas de signal camera")
             return
 
+        # --- Flip horizontal AVANT toute détection / dessin ---
+        # Comme ça les rectangles et textes apparaitront dans le bon sens à l'écran
+        # et le ressenti reste "miroir" pour l'utilisateur.
+        frame = cv2.flip(frame, 1)
+
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         # Detecter les visages (scaleFactor=1.1, minNeighbors=5 pour reduire les faux positifs)
         faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
@@ -1635,16 +1640,16 @@ class MainWindow(QMainWindow):
             face_cy = fy + fh // 2
 
             # --- Calcul de l'erreur (face vs centre image) ---
-            error_x = face_cx - frame_cx   # positif = visage a droite du centre
+            error_x = face_cx - frame_cx   # positif = visage a droite du centre (à l'écran)
             error_y = face_cy - frame_cy   # positif = visage en bas du centre
 
             # --- Calcul des angles cibles avec deadzone ---
+            # Note: comme la frame est déjà flippée, on inverse le signe d'error_x pour
+            # que le servo bouge dans le bon sens (vers le visage côté monde réel).
             if abs(error_x) < SERVO_DEAD_ZONE_PX:
-                # Dans la deadzone: ne pas bouger
                 desired_x = self.current_servo_angle_x
             else:
-                # Proportion de l'erreur dans le demi-ecran → angle (inversé)
-                desired_x = 90 + (-error_x / frame_cx) * 90 * SERVO_SENSITIVITY_X * SERVO_X_INVERT
+                desired_x = 90 + (error_x / frame_cx) * 90 * SERVO_SENSITIVITY_X * SERVO_X_INVERT
 
             if abs(error_y) < SERVO_DEAD_ZONE_PX:
                 desired_y = self.current_servo_angle_y
@@ -1665,8 +1670,7 @@ class MainWindow(QMainWindow):
             # --- Envoi a l'Arduino (fail silencieux si deconnecte) ---
             self._ft_send_angles(self.current_servo_angle_x, self.current_servo_angle_y)
 
-            # --- Dessin sur la frame ---
-            # Rectangle vert autour de tous les visages detectes
+            # --- Dessin sur la frame DÉJÀ flippée ---
             for (x, y, fw2, fh2) in faces:
                 cv2.rectangle(frame, (x, y), (x + fw2, y + fh2), (0, 220, 80), 2)
 
@@ -1706,9 +1710,8 @@ class MainWindow(QMainWindow):
         cv2.putText(frame, "X", (w - 40, axis_cy - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 220), 2, cv2.LINE_AA)
         cv2.putText(frame, "Y", (axis_cx + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 220), 2, cv2.LINE_AA)
 
-        # --- Affichage miroir dans le QLabel (camera inversée horizontalement) ---
-        frame_display = cv2.flip(frame, 1)
-        rgb = cv2.cvtColor(frame_display, cv2.COLOR_BGR2RGB)
+        # --- Affichage (pas de flip ici, déjà fait au début) ---
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         qimg = QImage(rgb.data, rgb.shape[1], rgb.shape[0],
                       rgb.shape[1] * 3, QImage.Format.Format_RGB888).copy()
         self.face_tracking_label.setPixmap(QPixmap.fromImage(qimg))
