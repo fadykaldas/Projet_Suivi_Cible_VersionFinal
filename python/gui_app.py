@@ -858,8 +858,19 @@ class MainWindow(QMainWindow):
         self.btn_measure_start.setObjectName("SecondaryBtn")
         self.btn_measure_start.clicked.connect(self.toggle_measure_camera)
 
+        self.btn_measure_reset = QPushButton("Recommencer (recalibrer)")
+        self.btn_measure_reset.setObjectName("SecondaryBtn")
+        self.btn_measure_reset.clicked.connect(self.reset_measure_state)
+
+        # Ligne horizontale pour les 2 boutons
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.btn_measure_start)
+        btn_row.addWidget(self.btn_measure_reset)
+        btn_container = QWidget()
+        btn_container.setLayout(btn_row)
+
         lay.addWidget(card("Mesure d'objet (CamRuler)", self.measure_label), 1)
-        lay.addWidget(self.btn_measure_start)
+        lay.addWidget(btn_container)
         return page
 
     def _build_image_3d_page(self) -> QWidget:
@@ -1277,13 +1288,22 @@ class MainWindow(QMainWindow):
         self.measure_timer.timeout.connect(self.measure_tick)
         self.measure_timer.start(30)
 
-        # Variables pour calibration et mesure avancée
+        # --- État du flow : "calibrating" -> "ready_to_select" -> "measured" ---
         self.measure_calibrated = False
         self.measure_pixels_per_mm = None
-        self.measure_ref_points = []  # Pour calibration (clics)
-        self.measure_contour = None
+        self.measure_ref_points = []  # 2 clics pour calibration
 
+        # --- État de la sélection rectangle (drag) ---
+        self.measure_drag_active = False    # True pendant que la souris est enfoncée
+        self.measure_drag_start = None      # (x, y) en pixels image
+        self.measure_drag_end = None        # (x, y) en pixels image, mis à jour pendant le drag
+        self.measure_selection_rect = None  # (x1, y1, x2, y2) une fois la sélection finalisée
+
+        # Branchement des handlers souris (press, move, release)
         self.measure_label.mousePressEvent = self.measure_mouse_press
+        self.measure_label.mouseMoveEvent = self.measure_mouse_move
+        self.measure_label.mouseReleaseEvent = self.measure_mouse_release
+        self.measure_label.setMouseTracking(True)
 
     def stop_measure_camera(self):
         self.measure_running = False
@@ -1294,24 +1314,109 @@ class MainWindow(QMainWindow):
             self.measure_cap.release()
         self.measure_label.setText("Camera stopped")
 
+    def reset_measure_state(self):
+        """Repart à zéro : oublie la calibration et la sélection. La caméra reste ouverte."""
+        if not getattr(self, 'measure_running', False):
+            return
+        self.measure_calibrated = False
+        self.measure_pixels_per_mm = None
+        self.measure_ref_points = []
+        self.measure_drag_active = False
+        self.measure_drag_start = None
+        self.measure_drag_end = None
+        self.measure_selection_rect = None
+
+    # ---------- HELPERS COORDONNÉES ----------
+    def _label_to_image_coords(self, x_label, y_label):
+        """Convertit (x,y) du QLabel vers (x,y) dans l'image originale de la camera.
+
+        Le QLabel peut afficher l'image redimensionnée; on utilise la dernière taille
+        connue de la frame (self._measure_last_frame_size) pour faire la conversion.
+        """
+        if not hasattr(self, '_measure_last_frame_size') or self._measure_last_frame_size is None:
+            return int(x_label), int(y_label)
+        frame_w, frame_h = self._measure_last_frame_size
+        label_w = max(1, self.measure_label.width())
+        label_h = max(1, self.measure_label.height())
+        # Le QPixmap est centré dans le QLabel par défaut, donc on calcule l'offset
+        # en supposant que l'image conserve son aspect ratio.
+        scale = min(label_w / frame_w, label_h / frame_h)
+        disp_w = frame_w * scale
+        disp_h = frame_h * scale
+        offset_x = (label_w - disp_w) / 2
+        offset_y = (label_h - disp_h) / 2
+        x_img = (x_label - offset_x) / scale
+        y_img = (y_label - offset_y) / scale
+        # Clamp
+        x_img = max(0, min(frame_w - 1, x_img))
+        y_img = max(0, min(frame_h - 1, y_img))
+        return int(x_img), int(y_img)
+
+    # ---------- HANDLERS SOURIS (MESURE D'OBJET) ----------
     def measure_mouse_press(self, event):
-        # Calibration : enregistrer 2 points de référence (clics)
-        if not self.measure_calibrated and self.measure_running:
-            x = event.position().x()
-            y = event.position().y()
-            self.measure_ref_points.append((int(x), int(y)))
+        if not self.measure_running:
+            return
+        x, y = self._label_to_image_coords(event.position().x(), event.position().y())
+
+        # Phase 1 : calibration (deux clics)
+        if not self.measure_calibrated:
+            self.measure_ref_points.append((x, y))
             if len(self.measure_ref_points) == 2:
-                # Demander à l'utilisateur la distance réelle (mm)
                 from PyQt6.QtWidgets import QInputDialog
-                dist, ok = QInputDialog.getDouble(self, "Calibration", "Distance réelle entre les 2 points (mm) :", 10, 0.1, 1000, 2)
-                if ok:
+                dist, ok = QInputDialog.getDouble(
+                    self, "Calibration",
+                    "Distance réelle entre les 2 points (mm) :",
+                    10.0, 0.1, 10000.0, 2
+                )
+                if ok and dist > 0:
                     dx = self.measure_ref_points[0][0] - self.measure_ref_points[1][0]
                     dy = self.measure_ref_points[0][1] - self.measure_ref_points[1][1]
-                    px_dist = (dx**2 + dy**2) ** 0.5
-                    self.measure_pixels_per_mm = px_dist / dist
-                    self.measure_calibrated = True
-        # Pourrait aussi servir à sélectionner un objet à mesurer
+                    px_dist = (dx * dx + dy * dy) ** 0.5
+                    if px_dist > 0:
+                        self.measure_pixels_per_mm = px_dist / dist
+                        self.measure_calibrated = True
+                    else:
+                        # Les deux clics sont au même endroit, on annule
+                        self.measure_ref_points = []
+                else:
+                    # L'utilisateur a annulé la calibration, on reset
+                    self.measure_ref_points = []
+            return
 
+        # Phase 2 : sélection rectangle de l'objet à mesurer
+        self.measure_drag_active = True
+        self.measure_drag_start = (x, y)
+        self.measure_drag_end = (x, y)
+        self.measure_selection_rect = None  # on efface l'ancienne sélection si on redessine
+
+    def measure_mouse_move(self, event):
+        if not self.measure_running or not self.measure_drag_active:
+            return
+        x, y = self._label_to_image_coords(event.position().x(), event.position().y())
+        self.measure_drag_end = (x, y)
+
+    def measure_mouse_release(self, event):
+        if not self.measure_running or not self.measure_drag_active:
+            return
+        x, y = self._label_to_image_coords(event.position().x(), event.position().y())
+        self.measure_drag_end = (x, y)
+        self.measure_drag_active = False
+
+        # Normaliser le rectangle (peu importe le sens du drag)
+        x1, y1 = self.measure_drag_start
+        x2, y2 = self.measure_drag_end
+        rx1, ry1 = min(x1, x2), min(y1, y2)
+        rx2, ry2 = max(x1, x2), max(y1, y2)
+
+        # Rejeter les rectangles trop petits (clic accidentel)
+        if (rx2 - rx1) < 5 or (ry2 - ry1) < 5:
+            self.measure_drag_start = None
+            self.measure_drag_end = None
+            return
+
+        self.measure_selection_rect = (rx1, ry1, rx2, ry2)
+
+    # ---------- TICK DE MESURE ----------
     def measure_tick(self):
         if not hasattr(self, 'measure_cap') or not self.measure_cap.isOpened():
             self.stop_measure_camera()
@@ -1322,54 +1427,76 @@ class MainWindow(QMainWindow):
             return
         display = frame.copy()
         h, w, _ = display.shape
+        self._measure_last_frame_size = (w, h)
 
-        # Afficher les points de calibration
-        for pt in self.measure_ref_points:
-            cv2.circle(display, pt, 6, (0,255,255), -1)
-        if len(self.measure_ref_points) == 2:
-            cv2.line(display, self.measure_ref_points[0], self.measure_ref_points[1], (0,255,255), 2)
+        # ---- Affichage selon la phase ----
+        if not self.measure_calibrated:
+            # PHASE 1 : CALIBRATION
+            # Afficher les points déjà cliqués
+            for pt in self.measure_ref_points:
+                cv2.circle(display, pt, 6, (0, 255, 255), -1)
+            if len(self.measure_ref_points) == 2:
+                cv2.line(display, self.measure_ref_points[0],
+                         self.measure_ref_points[1], (0, 255, 255), 2)
 
-        # Détection avancée : trouver le plus grand contour fermé (objet)
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (5,5), 0)
-        edged = cv2.Canny(blur, 50, 150)
-        contours, _ = cv2.findContours(edged, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            n = len(self.measure_ref_points)
+            msg = f"ETAPE 1/2 - CALIBRATION : cliquez sur 2 points de distance connue ({n}/2)"
+            self._draw_banner(display, msg, (0, 140, 255))
 
-        # Valeurs par défaut
-        area_mm = None
-        length_mm = None
-        width_mm = None
-
-        if contours:
-            c = max(contours, key=cv2.contourArea)
-            area_px = cv2.contourArea(c)
-            cv2.drawContours(display, [c], -1, (0,0,255), 2)
-            # Bounding box
-            x, y, w_box, h_box = cv2.boundingRect(c)
-            cv2.rectangle(display, (x, y), (x + w_box, y + h_box), (255, 0, 0), 2)
-            if self.measure_calibrated and self.measure_pixels_per_mm:
-                area_mm = area_px / (self.measure_pixels_per_mm ** 2)
-                length_mm = w_box / self.measure_pixels_per_mm
-                width_mm = h_box / self.measure_pixels_per_mm
-
-        # Affichage des mesures ou aide
-        if not self.measure_calibrated or not self.measure_pixels_per_mm:
-            cv2.putText(display, "Calibration: cliquez sur 2 points", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,140,255), 2)
         else:
-            surf_txt = f"Surface: {area_mm:.2f} mm2" if area_mm is not None else "Surface: N/A"
-            long_txt = f"Longueur: {length_mm:.2f} mm" if length_mm is not None else "Longueur: N/A"
-            larg_txt = f"Largeur: {width_mm:.2f} mm" if width_mm is not None else "Largeur: N/A"
-            cv2.putText(display, surf_txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-            cv2.putText(display, long_txt, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
-            cv2.putText(display, larg_txt, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,255), 2)
+            # PHASE 2 : SÉLECTION + MESURE
+            # Dessiner le rectangle en cours de drag (temps réel)
+            if self.measure_drag_active and self.measure_drag_start and self.measure_drag_end:
+                x1, y1 = self.measure_drag_start
+                x2, y2 = self.measure_drag_end
+                cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        # Affichage image
+            # Dessiner la sélection finalisée + afficher les mesures
+            if self.measure_selection_rect is not None:
+                rx1, ry1, rx2, ry2 = self.measure_selection_rect
+                cv2.rectangle(display, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
+
+                width_px = rx2 - rx1   # côté horizontal
+                height_px = ry2 - ry1  # côté vertical
+                length_mm = width_px / self.measure_pixels_per_mm
+                largeur_mm = height_px / self.measure_pixels_per_mm
+                surface_mm2 = length_mm * largeur_mm
+
+                # Mesures affichées en haut à gauche
+                lines = [
+                    f"Longueur (horiz.) : {length_mm:.2f} mm",
+                    f"Largeur  (vert.)  : {largeur_mm:.2f} mm",
+                    f"Surface (L x l)   : {surface_mm2:.2f} mm2",
+                ]
+                for i, txt in enumerate(lines):
+                    cv2.putText(display, txt, (10, 60 + i * 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                                (0, 255, 0), 2, cv2.LINE_AA)
+                self._draw_banner(display,
+                                  "MESURE OK - Cliquez-glissez pour mesurer un autre objet",
+                                  (0, 180, 0))
+            else:
+                self._draw_banner(display,
+                                  "ETAPE 2/2 - Cliquez-glissez pour dessiner un rectangle autour de l'objet",
+                                  (0, 180, 0))
+
+        # ---- Affichage image ----
         rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         bytes_per_line = ch * w
         qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
         pix = QPixmap.fromImage(qimg)
         self.measure_label.setPixmap(pix)
+
+    def _draw_banner(self, display, text, color_bgr):
+        """Bandeau d'instruction en haut de l'image."""
+        h, w, _ = display.shape
+        # Fond semi-opaque
+        overlay = display.copy()
+        cv2.rectangle(overlay, (0, 0), (w, 36), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.5, display, 0.5, 0, display)
+        cv2.putText(display, text, (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_bgr, 2, cv2.LINE_AA)
 
     def _build_face_tracking_page(self) -> QWidget:
         page = QWidget()
